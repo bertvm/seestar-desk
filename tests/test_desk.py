@@ -111,6 +111,16 @@ class ImageTests(unittest.TestCase):
         parsed = FrameParser().feed(frame)[0][1]
         self.assertTrue(to_jpeg(parsed).startswith(b"\xff\xd8"))
 
+    def test_display_frame_keeps_the_long_edge(self) -> None:
+        from seestar_desk.imaging import preview_and_display
+        pixels = array("H", [100, 400, 800, 1200] * 16)
+        frame = build_frame(pixels.tobytes(), PREVIEW, 8, 8, data_type=2)
+        parsed = FrameParser().feed(frame)[0][1]
+        preview, display = preview_and_display(parsed)
+        self.assertTrue(preview.startswith(b"\xff\xd8"))
+        self.assertTrue(display.startswith(b"\xff\xd8"))
+        self.assertGreaterEqual(len(display), len(preview))
+
 
 class CatalogTests(unittest.TestCase):
     def test_messier_list_is_complete(self) -> None:
@@ -291,6 +301,20 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.05)
         self.assertTrue(self.session.frames.get("stack", b"").startswith(b"\xff\xd8"))
+
+    async def test_park_stops_the_image_stream(self) -> None:
+        await self.session.claim()
+        await self.session.live("tele", True)
+        for _ in range(30):
+            if self.session._streams.get("tele") and self.session._streams["tele"].running:
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(self.session._streams.get("tele"))
+        await self.session.park()
+        self.assertTrue(self.session.state["parked"])
+        self.assertEqual(self.session._streams, {})
+        await self.session.live("tele", True)
+        self.assertEqual(self.session._streams, {})
 
     async def test_video_wifi_delete_and_plan(self) -> None:
         await self.session.claim()

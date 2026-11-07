@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seestar Desk on TV</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #e8edf4; font-family: Inter, "Segoe UI", sans-serif; }
+    body { display: grid; place-items: center; }
+    img, video { width: 100vw; height: 100vh; object-fit: contain; background: #000; }
+    video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    .bar {
+      position: fixed; left: 2vw; right: 2vw; bottom: 2vh;
+      display: flex; justify-content: space-between; align-items: end; gap: 2vw;
+      font-size: 1.5vw; letter-spacing: 0.01em; text-shadow: 0 2px 12px #000;
+    }
+    button {
+      font: inherit; font-size: 1.1vw; color: #e8edf4; background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 999px; padding: 0.4em 0.9em; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <img id="frame" alt="">
+  <canvas id="plate" hidden></canvas>
+  <video id="airplay" playsinline x-webkit-airplay="allow"></video>
+  <div class="bar">
+    <div id="caption">Waiting for a picture…</div>
+    <button id="airplay-btn" type="button" hidden>AirPlay</button>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const scope = params.get("scope") || "";
+    const camera = params.get("camera") || "tele";
+    const frame = document.querySelector("#frame");
+    const caption = document.querySelector("#caption");
+    const plate = document.querySelector("#plate");
+    const video = document.querySelector("#airplay");
+    const airplay = document.querySelector("#airplay-btn");
+
+    let parked = false;
+
+    function show(next) {
+      if (parked) return;
+      const token = String(next);
+      if (frame.dataset.seq === token) return;
+      frame.dataset.seq = token;
+      frame.src = `/api/scopes/${encodeURIComponent(scope)}/frame.jpg?profile=tv&camera=${encodeURIComponent(camera)}&seq=${encodeURIComponent(token)}`;
+    }
+
+    frame.onload = () => {
+      caption.textContent = "Live · full frame for a 4K screen";
+      const context = plate.getContext("2d");
+      plate.width = frame.naturalWidth;
+      plate.height = frame.naturalHeight;
+      context.drawImage(frame, 0, 0);
+      armAirPlay();
+    };
+
+    let airplayReady = false;
+    function armAirPlay() {
+      if (airplayReady || !plate.captureStream || !plate.width) return;
+      try {
+        video.srcObject = plate.captureStream(10);
+        video.play().catch(() => {});
+      } catch (error) {
+        return;
+      }
+      const canPick = typeof video.webkitShowPlaybackTargetPicker === "function" || (video.remote && video.remote.prompt);
+      if (!canPick) return;
+      airplayReady = true;
+      airplay.hidden = false;
+      airplay.onclick = () => {
+        if (typeof video.webkitShowPlaybackTargetPicker === "function") video.webkitShowPlaybackTargetPicker();
+        else video.remote.prompt();
+      };
+    }
+
+    if (!scope) {
+      caption.textContent = "Open this page from Play on TV in Seestar Desk.";
+    } else {
+      const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws`);
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === "state" && message.id === scope && message.parked) {
+          parked = true;
+          frame.removeAttribute("src");
+          caption.textContent = "Parked";
+          return;
+        }
+        if (message.type === "frame" && message.id === scope && (message.camera === camera || message.camera === "stack")) show(message.seq);
+      };
+      show("latest");
+    }
+  </script>
+</body>
+</html>

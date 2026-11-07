@@ -136,20 +136,28 @@ def _parse_header(header: bytes, payload: bytes) -> ImageFrame:
 FrameParser._skip_space = lambda self: _skip_space_buf(self._buf)  # type: ignore[method-assign]
 
 
-def to_jpeg(frame: ImageFrame, max_edge: int = 960) -> bytes | None:
+def to_jpeg(frame: ImageFrame, max_edge: int = 960, quality: int = 82) -> bytes | None:
     """Turn a firmware frame into a JPEG the browser can show."""
     if frame.img_type == ACK or not frame.payload:
         return None
     if frame.img_type == JPEG or frame.payload.startswith(b"\xff\xd8"):
-        return frame.payload
+        return _fit_jpeg(frame.payload, max_edge, quality)
     payload = _maybe_unzip(frame.payload, frame.width, frame.height, frame.img_type)
     if frame.img_type == PREVIEW or (
         frame.width and frame.height and len(payload) == frame.width * frame.height * 2
     ):
-        return _bayer_to_jpeg(payload, frame.width, frame.height, frame.big_endian, max_edge)
+        return _bayer_to_jpeg(payload, frame.width, frame.height, frame.big_endian, max_edge, quality)
     if frame.width and frame.height:
-        return _rgb16_to_jpeg(payload, frame.width, frame.height, frame.big_endian, max_edge)
+        return _rgb16_to_jpeg(payload, frame.width, frame.height, frame.big_endian, max_edge, quality)
     return None
+
+
+def preview_and_display(frame: ImageFrame) -> tuple[bytes | None, bytes | None]:
+    """A desk-sized JPEG and a full frame up to 4K on the long edge."""
+    display = to_jpeg(frame, max_edge=3840, quality=92)
+    if not display:
+        return None, None
+    return _fit_jpeg(display, 960, 82), display
 
 
 def _maybe_unzip(payload: bytes, width: int, height: int, img_type: int) -> bytes:
@@ -200,13 +208,26 @@ def _scale(value: int, black: int, white: int) -> int:
     return int((value - black) * 255 / (white - black))
 
 
-def _save_jpeg(image: Image.Image) -> bytes:
+def _save_jpeg(image: Image.Image, quality: int = 82) -> bytes:
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=82)
+    image.save(buffer, format="JPEG", quality=quality, subsampling=0 if quality >= 90 else 2)
     return buffer.getvalue()
 
 
-def _rgb16_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, max_edge: int) -> bytes:
+def _fit_jpeg(payload: bytes, max_edge: int, quality: int) -> bytes:
+    try:
+        image = Image.open(io.BytesIO(payload))
+        image.load()
+    except OSError:
+        return payload
+    edge = max(image.size)
+    if edge <= max_edge:
+        return payload
+    image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    return _save_jpeg(image.convert("RGB"), quality)
+
+
+def _rgb16_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, max_edge: int, quality: int = 82) -> bytes:
     needed = width * height * 3
     pixels = _u16_array(payload, needed, big_endian)
     step = max(1, math.ceil(max(width, height) / max_edge))
@@ -223,12 +244,12 @@ def _rgb16_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, ma
             raw[cursor + 1] = _scale(pixels[index + 1], black, white)
             raw[cursor + 2] = _scale(pixels[index + 2], black, white)
             cursor += 3
-    return _save_jpeg(Image.frombytes("RGB", (out_w, out_h), bytes(raw)))
+    return _save_jpeg(Image.frombytes("RGB", (out_w, out_h), bytes(raw)), quality)
 
 
-def _bayer_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, max_edge: int) -> bytes:
+def _bayer_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, max_edge: int, quality: int = 82) -> bytes:
     if width < 2 or height < 2:
-        return _rgb16_to_jpeg(payload, max(width, 1), max(height, 1), big_endian, max_edge)
+        return _rgb16_to_jpeg(payload, max(width, 1), max(height, 1), big_endian, max_edge, quality)
     pixels = _u16_array(payload, width * height, big_endian)
     step = max(2, math.ceil(max(width, height) / max_edge))
     if step % 2:
@@ -249,4 +270,4 @@ def _bayer_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, ma
             raw[cursor + 1] = _scale(green, black, white)
             raw[cursor + 2] = _scale(blue, black, white)
             cursor += 3
-    return _save_jpeg(Image.frombytes("RGB", (out_w, out_h), bytes(raw)))
+    return _save_jpeg(Image.frombytes("RGB", (out_w, out_h), bytes(raw)), quality)

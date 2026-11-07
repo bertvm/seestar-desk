@@ -12,7 +12,7 @@ from seestar_desk.auth import MISSING_KEY, find_key, sign_challenge
 from seestar_desk.discovery import FoundScope
 from seestar_desk.errors import ScopeError
 from seestar_desk.framing import LineBuffer, dumps
-from seestar_desk.imaging import ACK, JPEG, RAW, FrameParser, to_jpeg
+from seestar_desk.imaging import ACK, JPEG, RAW, FrameParser, preview_and_display
 from seestar_desk.plan import NightPlan
 
 UpdateHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -103,6 +103,7 @@ class ScopeSession:
         }
         self.log: list[dict[str, Any]] = []
         self.frames: dict[str, bytes] = {}
+        self.display_frames: dict[str, bytes] = {}
         self.frame_seq: dict[str, int] = {"tele": 0, "wide": 0, "stack": 0}
         self._streams: dict[str, ImageClient] = {}
         self._video_task: asyncio.Task | None = None
@@ -351,9 +352,24 @@ class ScopeSession:
         await self.refresh()
         return last
 
+    async def stop_images(self) -> None:
+        clients = list(self._streams.values())
+        self._streams.clear()
+        for client in clients:
+            await client.stop()
+
+    async def park(self) -> dict[str, Any]:
+        await self.stop_images()
+        response = await self.command("scope_park")
+        self.state["parked"] = True
+        return response
+
     async def set_mount_mode(self, equatorial: bool) -> dict[str, Any]:
+        await self.stop_images()
         await self.command("scope_move_to_horizon")
-        return await self.command("scope_park", {"equ_mode": bool(equatorial)})
+        response = await self.command("scope_park", {"equ_mode": bool(equatorial)})
+        self.state["parked"] = True
+        return response
 
     async def power(self, action: str) -> dict[str, Any]:
         method = {"restart": "pi_reboot", "shutdown": "pi_shutdown"}.get(action)
@@ -382,6 +398,9 @@ class ScopeSession:
 
     async def live(self, camera: str, enabled: bool) -> None:
         camera = "wide" if camera == "wide" else "tele"
+        if enabled and self.state.get("parked"):
+            await self.stop_images()
+            return
         current = self._streams.get(camera)
         if not enabled:
             if current:
@@ -621,9 +640,15 @@ class ScopeSession:
         except asyncio.CancelledError:
             raise
 
+    def _watch_park(self, before: Any) -> None:
+        if self.state.get("parked") and not before and self._streams:
+            asyncio.get_running_loop().create_task(self.stop_images())
+
     def _absorb(self, method: str, result: Any, message: dict[str, Any]) -> None:
+        before = self.state.get("parked")
         if method == "get_device_state":
             _absorb_device(self.state, result)
+            self._watch_park(before)
         elif method in {"scope_get_equ_coord", "scope_get_ra_dec"}:
             _absorb_equatorial(self.state, result)
         elif method == "scope_get_horiz_coord":
@@ -662,8 +687,10 @@ class ScopeSession:
         name = str(message.get("Event") or "")
         if not name:
             return
+        before = self.state.get("parked")
         if name == "PiStatus":
             _absorb_device(self.state, message)
+            self._watch_park(before)
         elif name in {"AutoGoto", "View", "ContinuousExposure"}:
             _absorb_view(self.state, message)
         elif name in {"Stack", "Exposure"}:
@@ -699,10 +726,12 @@ class ScopeSession:
         self.state["live_error"] = text
         await self._emit("state", self.snapshot())
 
-    async def _on_frame(self, camera: str, jpeg: bytes, frame_meta: dict[str, Any]) -> None:
+    async def _on_frame(self, camera: str, jpeg: bytes, frame_meta: dict[str, Any], display: bytes | None = None) -> None:
         self._frame_at[camera] = time.time()
         self.state["live_error"] = ""
         self.frames[camera] = jpeg
+        if display:
+            self.display_frames[camera] = display
         self.frame_seq[camera] = self.frame_seq.get(camera, 0) + 1
         await self._emit(
             "frame",
@@ -872,7 +901,7 @@ class ImageClient:
                 if error and item.get("method") not in {None, "test_connection"} and self.on_status:
                     await self.on_status(error)
                 continue
-            jpeg = await loop.run_in_executor(None, to_jpeg, item)
+            jpeg, display = await loop.run_in_executor(None, preview_and_display, item)
             if item.img_type == ACK:
                 note = item.payload.decode("latin1", "replace").strip()
                 lowered = note.lower()
@@ -891,6 +920,7 @@ class ImageClient:
                 role,
                 jpeg,
                 {"img_type": item.img_type, "width": item.width, "height": item.height},
+                display,
             )
 
 

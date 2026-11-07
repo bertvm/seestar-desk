@@ -20,7 +20,24 @@ const state = {
   skyPick: null,
   skyEngine: null,
   starChart: localStorage.getItem("seestar-starchart") === "gaia" ? "gaia" : "stellarium",
+  starDepth: localStorage.getItem("seestar-starmag") === "12" ? 12 : 7,
+  theme: "night",
 };
+
+const themes = [
+  { id: "night", name: "Night", swatch: "#e0b15a" },
+  { id: "slate", name: "Slate", swatch: "#7eb6e8" },
+  { id: "pine", name: "Pine", swatch: "#7dcea0" },
+  { id: "day", name: "Daylight", swatch: "#8d4e22" },
+];
+
+function applyTheme(theme) {
+  state.theme = themes.some((item) => item.id === theme) ? theme : "night";
+  document.documentElement.dataset.theme = state.theme;
+  localStorage.setItem("seestar-theme", state.theme);
+}
+
+applyTheme(localStorage.getItem("seestar-theme") || "night");
 
 document.body.classList.toggle("theater", state.layout === "theater");
 
@@ -34,7 +51,7 @@ function show(page) {
     button.classList.toggle("active", button.dataset.page === page);
   });
   render();
-  if (page === "picture" && state.snap && state.snap.connected) startLive(state.camera || "tele");
+  if (page === "picture" && state.snap && state.snap.connected && !state.snap.parked) startLive(state.camera || "tele");
 }
 
 async function api(path, options) {
@@ -335,8 +352,13 @@ function paintMeters() {
   });
   const liveSeq = snap.frame_seq && snap.frame_seq[state.camera];
   const stackSeq = snap.frame_seq && snap.frame_seq.stack;
-  showFrame("#stage", liveSeq || stackSeq, liveSeq ? state.camera : "stack");
-  showFrame("#stack-stage", stackSeq, "stack");
+  if (snap.parked) {
+    clearFrame("#stage", "Parked");
+    clearFrame("#stack-stage", "Parked");
+  } else {
+    showFrame("#stage", liveSeq || stackSeq, liveSeq ? state.camera : "stack");
+    showFrame("#stack-stage", stackSeq, "stack");
+  }
   const plot = document.querySelector("#pa-plot .dot");
   const align = snap.align || {};
   const ax = Number(align.x ?? align.eq_offset_az);
@@ -357,6 +379,18 @@ function paintMeters() {
     badge.title = `${fmtNum(snap.battery, "%")}${snap.charging ? ", charging" : ""}`;
     badge.innerHTML = batteryBadge(snap.battery, snap.charging);
   }
+  const control = document.querySelector("[data-control]");
+  if (control && snap.id === control.dataset.control) {
+    const held = Boolean(snap.master);
+    control.textContent = held ? "In control" : "Watching";
+    control.classList.toggle("primary", held);
+  }
+  const linkButton = document.querySelector(".actions [data-connect]");
+  if (linkButton && snap.id === linkButton.dataset.connect) {
+    const linked = Boolean(snap.connected);
+    linkButton.textContent = linked ? "Connected" : "Connect";
+    linkButton.title = linked ? "Disconnect" : "Connect";
+  }
   syncSkyObserver();
 }
 
@@ -364,6 +398,19 @@ function paintReadings() {
   const root = document.querySelector("[data-readings]");
   if (!root || !state.snap || root.dataset.readings !== state.snap.id) return;
   root.innerHTML = readingsHtml(state.snap);
+}
+
+function clearFrame(selector, text) {
+  const stage = document.querySelector(selector);
+  const empty = document.querySelector(`${selector}-empty`);
+  if (stage) {
+    stage.removeAttribute("src");
+    stage.dataset.seq = "";
+  }
+  if (empty) {
+    empty.hidden = false;
+    if (text) empty.textContent = text;
+  }
 }
 
 function showFrame(selector, seq, camera) {
@@ -520,11 +567,11 @@ function readingsHtml(snap) {
 }
 
 function scopeActions(scope) {
+  const held = Boolean(scope.connected && scope.master);
   return `
     <div class="actions">
-      <button class="primary" data-connect="${escapeHtml(scope.id)}">${scope.connected && scope.id === state.selected ? "Connected" : "Connect"}</button>
-      <button data-claim="${escapeHtml(scope.id)}">Claim control</button>
-      <button data-release="${escapeHtml(scope.id)}">Release</button>
+      <button class="primary" data-connect="${escapeHtml(scope.id)}" title="${scope.connected && scope.id === state.selected ? "Disconnect" : "Connect"}">${scope.connected && scope.id === state.selected ? "Connected" : "Connect"}</button>
+      <button data-control="${escapeHtml(scope.id)}" class="${held ? "primary" : ""}">${held ? "In control" : "Watching"}</button>
       <button class="warn" data-power="restart" data-id="${escapeHtml(scope.id)}">Restart</button>
       <button class="danger" data-power="shutdown" data-id="${escapeHtml(scope.id)}">Shut down</button>
     </div>`;
@@ -625,9 +672,10 @@ function renderSky() {
       <div class="chart-switch">
         <button type="button" data-chart="stellarium" class="${state.starChart === "gaia" ? "" : "primary"}">Stellarium</button>
         <button type="button" data-chart="gaia" class="${state.starChart === "gaia" ? "primary" : ""}">Gaia</button>
+        <button type="button" id="star-depth" class="${state.starDepth === 12 ? "primary" : ""}">Magnitude 12</button>
       </div>
     </div>
-    <p class="muted chart-note">${state.starChart === "gaia" ? "Gaia adds faint stars and needs the internet. Bright stars stay from the Stellarium chart." : "Stellarium is stored on this computer, down to magnitude 7."}</p>
+    <p class="muted chart-note">${chartNote()}</p>
     ${banner()}
     <div class="skymap-wrap card">
       <canvas id="skymap" class="skymap"></canvas>
@@ -711,6 +759,7 @@ function renderPicture() {
         <button id="live-tele">Telephoto</button>
         <button id="live-wide">Wide camera</button>
         <button id="live-stop">Stop live view</button>
+        <button id="play-tv">Play on TV</button>
       </div>
     </div>
     ${banner()}
@@ -968,7 +1017,14 @@ function renderSettings() {
   return `
     <div class="page-head"><h1>Settings</h1></div>
     ${banner()}
-    <form class="card" id="site">
+    <section class="card">
+      <h2>Appearance</h2>
+      <p class="muted">The choice stays on this browser.</p>
+      <div class="theme-switch">
+        ${themes.map((item) => `<button type="button" data-theme-choice="${item.id}" class="${state.theme === item.id ? "primary" : ""}"><span class="swatch" style="background:${item.swatch}"></span>${item.name}</button>`).join("")}
+      </div>
+    </section>
+    <form class="card" id="site" style="margin-top:0.8rem">
       <h2>Place and clock</h2>
       <p class="muted">Saved place <b>${escapeHtml(placeText(snap))}</b></p>
       <p class="muted">Telescope clock <b>${escapeHtml(snap.clock || "—")}</b></p>
@@ -1104,6 +1160,9 @@ function prepareSky(engine) {
   sources.forEach(([module, url]) => {
     try { module.addDataSource({ url }); } catch (error) { /* a missing survey leaves the rest of the map usable */ }
   });
+  if (state.starDepth === 12) {
+    try { engine.core.stars.addDataSource({ url: "/api/sky/stars", key: "extended" }); } catch (error) { /* the bright chart remains */ }
+  }
   if (state.starChart === "gaia") {
     try { engine.core.stars.addDataSource({ url: "/api/sky/gaia", key: "gaia" }); } catch (error) { /* the bright chart remains */ }
   }
@@ -1189,20 +1248,17 @@ async function loadBestTonight() {
   chooseTonight({ ...picks[0], index: 0 });
 }
 
-function chooseStarChart(chart) {
-  chart = chart === "gaia" ? "gaia" : "stellarium";
-  if (chart === state.starChart) return;
-  state.starChart = chart;
-  localStorage.setItem("seestar-starchart", chart);
-  document.querySelectorAll("[data-chart]").forEach((button) => {
-    button.classList.toggle("primary", button.dataset.chart === chart);
-  });
-  const note = document.querySelector(".chart-note");
-  if (note) {
-    note.textContent = chart === "gaia"
-      ? "Gaia adds faint stars and needs the internet. Bright stars stay from the Stellarium chart."
-      : "Stellarium is stored on this computer, down to magnitude 7.";
+function chartNote() {
+  const stored = state.starDepth === 12
+    ? " Stars from magnitude 8 to 12 are kept on this computer after the first view."
+    : "";
+  if (state.starChart === "gaia") {
+    return "Gaia adds fainter stars and needs the internet. Bright stars stay from the Stellarium chart." + stored;
   }
+  return "Stellarium is stored on this computer, down to magnitude 7." + stored;
+}
+
+function reloadSky(message) {
   const canvas = document.querySelector("#skymap");
   if (!canvas) return;
   const fresh = document.createElement("canvas");
@@ -1212,9 +1268,32 @@ function chooseStarChart(chart) {
   const status = document.querySelector("#skymap-status");
   if (status) {
     status.hidden = false;
-    status.textContent = chart === "gaia" ? "Loading Gaia…" : "Loading the sky map…";
+    status.textContent = message;
   }
   mountSky();
+}
+
+function chooseStarDepth() {
+  state.starDepth = state.starDepth === 12 ? 7 : 12;
+  localStorage.setItem("seestar-starmag", String(state.starDepth));
+  const button = document.querySelector("#star-depth");
+  if (button) button.classList.toggle("primary", state.starDepth === 12);
+  const note = document.querySelector(".chart-note");
+  if (note) note.textContent = chartNote();
+  reloadSky(state.starDepth === 12 ? "Storing stars to magnitude 12…" : "Loading the sky map…");
+}
+
+function chooseStarChart(chart) {
+  chart = chart === "gaia" ? "gaia" : "stellarium";
+  if (chart === state.starChart) return;
+  state.starChart = chart;
+  localStorage.setItem("seestar-starchart", chart);
+  document.querySelectorAll("[data-chart]").forEach((button) => {
+    button.classList.toggle("primary", button.dataset.chart === chart);
+  });
+  const note = document.querySelector(".chart-note");
+  if (note) note.textContent = chartNote();
+  reloadSky(chart === "gaia" ? "Loading Gaia…" : "Loading the sky map…");
 }
 
 function mountSky() {
@@ -1260,7 +1339,16 @@ function bind() {
   };
   document.querySelectorAll("[data-connect]").forEach((button) => {
     button.onclick = () => guard(async () => {
-      state.selected = button.dataset.connect;
+      const id = button.dataset.connect;
+      const linked = Boolean(state.snap && state.snap.connected && state.snap.id === id && state.selected === id);
+      if (linked) {
+        await api(`/api/scopes/${encodeURIComponent(id)}/disconnect`, { method: "POST" });
+        state.snap = null;
+        state.scopes = (await api("/api/scopes")).scopes;
+        render();
+        return;
+      }
+      state.selected = id;
       localStorage.setItem("seestar-scope", state.selected);
       state.error = "";
       state.snap = await api(scopePath("/connect"), { method: "POST" });
@@ -1268,17 +1356,11 @@ function bind() {
       render();
     });
   });
-  document.querySelectorAll("[data-claim]").forEach((button) => {
+  document.querySelectorAll("[data-control]").forEach((button) => {
     button.onclick = () => guard(async () => {
-      state.selected = button.dataset.claim;
-      state.snap = await api(scopePath("/claim"), { method: "POST" });
-      render();
-    });
-  });
-  document.querySelectorAll("[data-release]").forEach((button) => {
-    button.onclick = () => guard(async () => {
-      state.selected = button.dataset.release;
-      state.snap = await api(scopePath("/release"), { method: "POST" });
+      state.selected = button.dataset.control;
+      const held = Boolean(state.snap && state.snap.id === state.selected && state.snap.master);
+      state.snap = await api(scopePath(held ? "/release" : "/claim"), { method: "POST" });
       render();
     });
   });
@@ -1317,6 +1399,7 @@ function bind() {
   document.querySelectorAll("[data-chart]").forEach((button) => {
     button.onclick = () => chooseStarChart(button.dataset.chart);
   });
+  bindClick("#star-depth", () => chooseStarDepth());
   bindClick("#best-tonight", () => guard(loadBestTonight));
   bindClick("#sky-view", () => {
     const pick = state.skyPick;
@@ -1368,6 +1451,7 @@ function bind() {
   bindClick("#live-tele", () => startLive("tele"));
   bindClick("#live-wide", () => startLive("wide"));
   bindClick("#live-stop", () => guard(async () => { await api(scopePath("/live"), { method: "POST", body: JSON.stringify({ enabled: false, camera: state.camera }) }); }));
+  bindClick("#play-tv", () => playOnTv());
   bindClick("#stack-start", () => post("/stack", { action: "start", restart: document.querySelector("#restart")?.checked ?? true, gain: document.querySelector("#gain")?.value }));
   bindClick("#stack-stop", () => post("/stack", { action: "stop" }));
   const mosaic = document.querySelector("#mosaic");
@@ -1445,6 +1529,14 @@ function bind() {
     }
     toast(`Copied ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} to ${result.dest}`);
   }));
+  document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+    button.onclick = () => {
+      applyTheme(button.dataset.themeChoice);
+      document.querySelectorAll("[data-theme-choice]").forEach((item) => {
+        item.classList.toggle("primary", item.dataset.themeChoice === state.theme);
+      });
+    };
+  });
   const site = document.querySelector("#site");
   if (site) site.onsubmit = (event) => {
     event.preventDefault();
@@ -1590,8 +1682,32 @@ function post(path, body) {
   });
 }
 
+function playOnTv() {
+  if (!state.selected) {
+    toast("Connect a telescope first.");
+    return;
+  }
+  const url = new URL("/tv", location.href);
+  url.searchParams.set("scope", state.selected);
+  url.searchParams.set("camera", state.camera || "tele");
+  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+    toast("Open the desk from this computer’s network address so the television can reach it, then use Play on TV.");
+    return;
+  }
+  if (window.PresentationRequest) {
+    const request = new PresentationRequest([url.href]);
+    request.start().catch((error) => {
+      if (error && error.name === "AbortError") return;
+      window.open(url.href, "seestar-tv");
+    });
+    return;
+  }
+  window.open(url.href, "seestar-tv");
+}
+
 function startLive(camera) {
   state.camera = camera;
+  if (state.snap && state.snap.parked) return;
   return guard(async () => {
     await api(scopePath("/live"), { method: "POST", body: JSON.stringify({ camera, enabled: true }) });
   });
@@ -1672,7 +1788,7 @@ function drawRose() {
   const theta = (az - 90) * Math.PI / 180;
   const x = cx + Math.cos(theta) * radius;
   const y = cy + Math.sin(theta) * radius;
-  ctx.fillStyle = "#e0b15a";
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#e0b15a";
   ctx.beginPath();
   ctx.arc(x, y, 6, 0, Math.PI * 2);
   ctx.fill();

@@ -135,11 +135,13 @@ def build_app(desk: Desk) -> web.Application:
     app = web.Application(middlewares=[errors])
     app["desk"] = desk
     app.router.add_get("/", lambda _request: web.FileResponse(WEB_ROOT / "index.html"))
+    app.router.add_get("/tv", lambda _request: web.FileResponse(WEB_ROOT / "tv.html"))
     app.router.add_static("/static", WEB_ROOT)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/catalog", catalog)
     app.router.add_get("/api/sky/tonight", tonight)
     app.router.add_get("/api/sky/gaia/{tail:.*}", gaia_survey)
+    app.router.add_get("/api/sky/stars/{tail:.*}", deep_stars)
     app.router.add_get("/api/scopes", scopes)
     app.router.add_post("/api/discover", do_discover)
     app.router.add_post("/api/scopes", add_scope)
@@ -223,6 +225,49 @@ async def gaia_survey(request: web.Request) -> web.Response:
     if status != 200:
         raise web.HTTPBadGateway(text="The Gaia chart did not answer.")
     return web.Response(body=body, content_type=kind or "application/octet-stream")
+
+
+_DEEP_TILE = re.compile(r"^(?:properties|Norder[0-3]/Dir\d+/Npix\d+\.eph|Norder[0-3]/Allsky\.eph)$")
+_DEEP_ROOT = (
+    "https://stellarium.sfo2.cdn.digitaloceanspaces.com/"
+    "stellarium-web/libswe-1.17.0-48d7978eca/asset_pack_extended/stars"
+)
+
+
+def _deep_cache(path: str) -> Path:
+    return Path.home() / ".seestar-desk" / "stars" / path
+
+
+def _deep_body(path: str) -> tuple[int, bytes, str]:
+    kind = "text/plain" if path == "properties" else "application/octet-stream"
+    cached = _deep_cache(path)
+    if cached.is_file():
+        return 200, cached.read_bytes(), kind
+    request = urllib.request.Request(f"{_DEEP_ROOT}/{path}", headers={"User-Agent": "SeestarDesk"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        status = 404 if exc.code in {403, 404} else exc.code
+        return status, b"", kind
+    if status != 200:
+        return status, b"", kind
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(body)
+    return 200, body, kind
+
+
+async def deep_stars(request: web.Request) -> web.Response:
+    path = request.match_info["tail"].strip("/")
+    if not _DEEP_TILE.match(path):
+        raise web.HTTPNotFound()
+    status, body, kind = await asyncio.to_thread(_deep_body, path)
+    if status == 404:
+        raise web.HTTPNotFound()
+    if status != 200:
+        raise web.HTTPBadGateway(text="The deeper star chart did not answer.")
+    return web.Response(body=body, content_type=kind)
 
 
 async def scopes(request: web.Request) -> web.Response:
@@ -319,7 +364,7 @@ async def power(request: web.Request) -> web.Response:
 
 async def park(request: web.Request) -> web.Response:
     session = await _session(request)
-    await session.command("scope_park")
+    await session.park()
     return web.json_response(session.snapshot())
 
 
@@ -491,7 +536,8 @@ async def frame(request: web.Request) -> web.Response:
     camera = request.query.get("camera") or "tele"
     if camera not in {"wide", "tele", "stack"}:
         camera = "tele"
-    jpeg = session.frames.get(camera)
+    source = session.display_frames if request.query.get("profile") == "tv" else session.frames
+    jpeg = source.get(camera) or session.frames.get(camera)
     if not jpeg:
         return web.Response(status=404, text="No frame yet")
     return web.Response(body=jpeg, content_type="image/jpeg")

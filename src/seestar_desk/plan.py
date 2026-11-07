@@ -132,7 +132,7 @@ class NightPlan:
                 self.status["detail"] = "The list is finished."
                 if self.options.get("park_when_finished"):
                     self.status["detail"] = "The list is finished. Parking."
-                    await self.session.command("scope_park")
+                    await self.session.park()
         except asyncio.CancelledError:
             self.status["step"] = "stopped"
             raise
