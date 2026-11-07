@@ -1,0 +1,232 @@
+[
+  {
+    "file": "m1dumont.png",
+    "ra": 83.6296,
+    "dec": 22.018,
+    "widthDeg": 0.1358,
+    "heightDeg": 0.1352,
+    "orientation": -4.38,
+    "pixels": 512,
+    "credit": "Stephane Dumont"
+  },
+  {
+    "file": "m8.png",
+    "ra": 271.5359,
+    "dec": -24.0736,
+    "widthDeg": 2.4043,
+    "heightDeg": 2.4031,
+    "orientation": 3.83,
+    "pixels": 1024,
+    "credit": "Dylan O'Donnell"
+  },
+  {
+    "file": "m11.png",
+    "ra": 282.784,
+    "dec": -6.2653,
+    "widthDeg": 0.226,
+    "heightDeg": 0.2259,
+    "orientation": 2.21,
+    "pixels": 256,
+    "credit": "Grasslands Observatory"
+  },
+  {
+    "file": "m13.png",
+    "ra": 250.4204,
+    "dec": 36.4604,
+    "widthDeg": 0.4462,
+    "heightDeg": 0.4468,
+    "orientation": 0.43,
+    "pixels": 1024,
+    "credit": "Starhopper"
+  },
+  {
+    "file": "m16.png",
+    "ra": 274.7354,
+    "dec": -13.8064,
+    "widthDeg": 1.4596,
+    "heightDeg": 1.4605,
+    "orientation": 16.49,
+    "pixels": 1024,
+    "credit": "Sun Gang"
+  },
+  {
+    "file": "m17.png",
+    "ra": 275.1968,
+    "dec": -16.1241,
+    "widthDeg": 0.7117,
+    "heightDeg": 0.7116,
+    "orientation": -19.6,
+    "pixels": 1024,
+    "credit": "Dylan O'Donnell"
+  },
+  {
+    "file": "m20.png",
+    "ra": 270.5993,
+    "dec": -22.9744,
+    "widthDeg": 0.5465,
+    "heightDeg": 0.5466,
+    "orientation": -1.14,
+    "pixels": 512,
+    "credit": "Hewholooks"
+  },
+  {
+    "file": "m22.png",
+    "ra": 279.1037,
+    "dec": -23.8983,
+    "widthDeg": 0.4386,
+    "heightDeg": 0.4399,
+    "orientation": -0.11,
+    "pixels": 512,
+    "credit": "Hewholooks"
+  },
+  {
+    "file": "m27dumont.png",
+    "ra": 299.901,
+    "dec": 22.7216,
+    "widthDeg": 0.1391,
+    "heightDeg": 0.1389,
+    "orientation": 1.26,
+    "pixels": 512,
+    "credit": "Stephane Dumont"
+  },
+  {
+    "file": "m31.png",
+    "ra": 10.7069,
+    "dec": 41.1598,
+    "widthDeg": 2.832,
+    "heightDeg": 2.8287,
+    "orientation": 3.35,
+    "pixels": 1024,
+    "credit": "LEE ang HG731GZ"
+  },
+  {
+    "file": "m33.png",
+    "ra": 23.4831,
+    "dec": 30.6601,
+    "widthDeg": 1.2892,
+    "heightDeg": 1.2892,
+    "orientation": 40.35,
+    "pixels": 1024,
+    "credit": "HG731GZ"
+  },
+  {
+    "file": "m35.png",
+    "ra": 92.2665,
+    "dec": 24.3259,
+    "widthDeg": 0.2228,
+    "heightDeg": 0.2237,
+    "orientation": 8.37,
+    "pixels": 256,
+    "credit": "Grasslands Observatory"
+  },
+  {
+    "file": "m42.png",
+    "ra": 84.2727,
+    "dec": -5.726,
+    "widthDeg": 3.2209,
+    "heightDeg": 3.2164,
+    "orientation": 7.15,
+    "pixels": 1024,
+    "credit": "HG731GZ"
+  },
+  {
+    "file": "m44.png",
+    "ra": 129.9671,
+    "dec": 19.629,
+    "widthDeg": 1.1572,
+    "heightDeg": 1.1566,
+    "orientation": -3.34,
+    "pixels": 512,
+    "credit": "Giuseppe Donatiello"
+  },
+  {
+    "file": "pleiades.png",
+    "ra": 56.6601,
+    "dec": 24.1139,
+    "widthDeg": 1.5086,
+    "heightDeg": 1.5084,
+    "orientation": 35.2,
+    "pixels": 1024,
+    "credit": "HG731GZ"
+  },
+  {
+    "file": "m51-vasey.png",
+    "ra": 202.4836,
+    "dec": 47.2274,
+    "widthDeg": 0.3822,
+    "heightDeg": 0.3824,
+    "orientation": -12.18,
+    "pixels": 1024,
+    "credit": "Plover Hill Observatory"
+  },
+  {
+    "file": "m57dumont.png",
+    "ra": 283.3957,
+    "dec": 33.0281,
+    "widthDeg": 0.0498,
+    "heightDeg": 0.0502,
+    "orientation": 16.04,
+    "pixels": 256,
+    "credit": "Stephane Dumont"
+  },
+  {
+    "file": "m78.png",
+    "ra": 86.7859,
+    "dec": 0.1221,
+    "widthDeg": 1.3643,
+    "heightDeg": 1.364,
+    "orientation": -2.09,
+    "pixels": 1024,
+    "credit": "Manuel Peitsch, post-processing: Sun Shuwei"
+  },
+  {
+    "file": "m81.png",
+    "ra": 148.9001,
+    "dec": 69.0644,
+    "widthDeg": 0.4757,
+    "heightDeg": 0.4754,
+    "orientation": -0.19,
+    "pixels": 512,
+    "credit": "Kees Scherer, post-processing: Sun Shuwei"
+  },
+  {
+    "file": "m92.png",
+    "ra": 259.2889,
+    "dec": 43.1251,
+    "widthDeg": 0.2467,
+    "heightDeg": 0.2465,
+    "orientation": 0.49,
+    "pixels": 512,
+    "credit": "Hewholooks"
+  },
+  {
+    "file": "m101-vasey.png",
+    "ra": 210.8587,
+    "dec": 54.3661,
+    "widthDeg": 0.6886,
+    "heightDeg": 0.6885,
+    "orientation": -0.05,
+    "pixels": 512,
+    "credit": "Plover Hill Observatory"
+  },
+  {
+    "file": "m104.png",
+    "ra": 189.9968,
+    "dec": -11.6295,
+    "widthDeg": 0.2589,
+    "heightDeg": 0.2587,
+    "orientation": 0.04,
+    "pixels": 256,
+    "credit": "Adam Block/Mount Lemmon SkyCenter/University of Arizona & Ngc1535, post-processing: Sun Shuwei"
+  },
+  {
+    "file": "n6960.png",
+    "ra": 313.0254,
+    "dec": 30.6402,
+    "widthDeg": 3.8387,
+    "heightDeg": 3.8366,
+    "orientation": 21.02,
+    "pixels": 1024,
+    "credit": "Jose A Mtanous"
+  }
+]

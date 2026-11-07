@@ -142,6 +142,8 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_get("/api/sky/tonight", tonight)
     app.router.add_get("/api/sky/gaia/{tail:.*}", gaia_survey)
     app.router.add_get("/api/sky/stars/{tail:.*}", deep_stars)
+    app.router.add_get("/api/sky/pictures/{tail:.*}", sky_pictures)
+    app.router.add_get("/api/sky/nebula/{name}", sky_nebula)
     app.router.add_get("/api/scopes", scopes)
     app.router.add_post("/api/discover", do_discover)
     app.router.add_post("/api/scopes", add_scope)
@@ -225,6 +227,108 @@ async def gaia_survey(request: web.Request) -> web.Response:
     if status != 200:
         raise web.HTTPBadGateway(text="The Gaia chart did not answer.")
     return web.Response(body=body, content_type=kind or "application/octet-stream")
+
+
+_PICTURE_TILE = re.compile(r"^(?:properties|Norder[3-9]/Dir\d+/Npix\d+\.webp|Norder[3-9]/Allsky\.webp)$")
+_PICTURE_ROOT = "https://data.stellarium.org/surveys/dss"
+
+
+def _picture_cache(path: str) -> Path:
+    return Path.home() / ".seestar-desk" / "pictures" / path
+
+
+def _picture_body(path: str) -> tuple[int, bytes, str]:
+    kind = "text/plain" if path == "properties" else "image/webp"
+    cached = _picture_cache(path)
+    if cached.is_file():
+        return 200, cached.read_bytes(), kind
+    request = urllib.request.Request(f"{_PICTURE_ROOT}/{path}", headers={"User-Agent": "SeestarDesk"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        status = 404 if exc.code in {403, 404} else exc.code
+        return status, b"", kind
+    if status != 200:
+        return status, b"", kind
+    if path == "properties" and b"hips_order_min" not in body:
+        body = body.rstrip() + b"\nhips_order_min       = 3\n"
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(body)
+    return 200, body, kind
+
+
+async def sky_pictures(request: web.Request) -> web.Response:
+    path = request.match_info["tail"].strip("/")
+    if not _PICTURE_TILE.match(path):
+        raise web.HTTPNotFound()
+    status, body, kind = await asyncio.to_thread(_picture_body, path)
+    if status == 404:
+        raise web.HTTPNotFound()
+    if status != 200:
+        raise web.HTTPBadGateway(text="The sky pictures did not answer.")
+    return web.Response(body=body, content_type=kind or "application/octet-stream")
+
+
+_NEBULA_ROOT = "https://raw.githubusercontent.com/Stellarium/stellarium/master/nebulae/default"
+_NEBULA_FILE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,40}\.png$")
+
+
+def _nebula_names() -> set[str]:
+    catalog = WEB_ROOT / "sky" / "data" / "nebulae.json"
+    items = json.loads(catalog.read_text())
+    return {str(item["file"]) for item in items}
+
+
+def _nebula_cache(name: str) -> Path:
+    return Path.home() / ".seestar-desk" / "nebulae" / name
+
+
+def _cut_sky(body: bytes) -> bytes:
+    """Keep the nebula and drop the black plate so the chart stays dark."""
+    import io
+
+    from PIL import Image, ImageChops
+
+    image = Image.open(io.BytesIO(body)).convert("RGBA")
+    red, green, blue, _alpha = image.split()
+    bright = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+    image.putalpha(bright.point(lambda value: 0 if value < 10 else min(255, int((value - 10) * 1.8))))
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+def _nebula_body(name: str) -> tuple[int, bytes]:
+    cached = _nebula_cache(name)
+    if cached.is_file():
+        return 200, cached.read_bytes()
+    request = urllib.request.Request(f"{_NEBULA_ROOT}/{name}", headers={"User-Agent": "SeestarDesk"})
+    try:
+        with urllib.request.urlopen(request, timeout=40) as response:
+            body = response.read()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        return (404 if exc.code in {403, 404} else exc.code), b""
+    if status != 200:
+        return status, b""
+    body = _cut_sky(body)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(body)
+    return 200, body
+
+
+async def sky_nebula(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    if not _NEBULA_FILE.match(name) or name not in _nebula_names():
+        raise web.HTTPNotFound()
+    status, body = await asyncio.to_thread(_nebula_body, name)
+    if status == 404:
+        raise web.HTTPNotFound()
+    if status != 200:
+        raise web.HTTPBadGateway(text="The nebula picture did not answer.")
+    return web.Response(body=body, content_type="image/png")
 
 
 _DEEP_TILE = re.compile(r"^(?:properties|Norder[0-3]/Dir\d+/Npix\d+\.eph|Norder[0-3]/Allsky\.eph)$")

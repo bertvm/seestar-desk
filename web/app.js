@@ -21,6 +21,7 @@ const state = {
   skyEngine: null,
   starChart: localStorage.getItem("seestar-starchart") === "gaia" ? "gaia" : "stellarium",
   starDepth: localStorage.getItem("seestar-starmag") === "12" ? 12 : 7,
+  skyPictures: localStorage.getItem("seestar-skypics") === "1",
   theme: "night",
   alignTimer: 0,
 };
@@ -768,6 +769,7 @@ function renderSky() {
         <button type="button" data-chart="stellarium" class="${state.starChart === "gaia" ? "" : "primary"}">Stellarium</button>
         <button type="button" data-chart="gaia" class="${state.starChart === "gaia" ? "primary" : ""}">Gaia</button>
         <button type="button" id="star-depth" class="${state.starDepth === 12 ? "primary" : ""}">Magnitude 12</button>
+        <button type="button" id="sky-pictures" class="${state.skyPictures ? "primary" : ""}">Pictures</button>
       </div>
     </div>
     <p class="muted chart-note">${chartNote()}</p>
@@ -1294,6 +1296,9 @@ function prepareSky(engine) {
   if (state.starChart === "gaia") {
     try { engine.core.stars.addDataSource({ url: "/api/sky/gaia", key: "gaia" }); } catch (error) { /* the bright chart remains */ }
   }
+  if (engine.core.dss) engine.core.dss.visible = false;
+  if (engine.core.atmosphere) engine.core.atmosphere.visible = false;
+  if (state.skyPictures) loadNebulae(engine);
   try {
     engine.core.skycultures.addDataSource({ url: base + "skycultures/western", key: "western" });
     engine.core.constellations.lines_visible = true;
@@ -1304,6 +1309,31 @@ function prepareSky(engine) {
     return 0;
   });
   state.skyEngine = engine;
+}
+
+function loadNebulae(engine) {
+  fetch("/static/sky/data/nebulae.json")
+    .then((response) => response.json())
+    .then((items) => {
+      if (state.skyEngine !== engine) return;
+      state.skyPhotos = items.map((item) => {
+        const photo = engine.createObj("photo", {
+          visible: true,
+          url: `/api/sky/nebula/${item.file}`,
+        });
+        if (!photo) return null;
+        photo.calibration = [{
+          ra: item.ra,
+          dec: item.dec,
+          orientation: item.orientation,
+          pixscale: item.widthDeg * 3600 / item.pixels,
+        }];
+        engine.core.add(photo);
+        photo.retain();
+        return photo;
+      }).filter(Boolean);
+    })
+    .catch(() => { /* the star chart remains */ });
 }
 
 function chooseTonight(item) {
@@ -1380,10 +1410,13 @@ function chartNote() {
   const stored = state.starDepth === 12
     ? " Stars from magnitude 8 to 12 are kept on this computer after the first view."
     : "";
+  const pictures = state.skyPictures
+    ? " Nebula and cluster photographs sit on the dark sky. Zoom in to see them. They are kept on this computer after the first view."
+    : "";
   if (state.starChart === "gaia") {
-    return "Gaia adds fainter stars and needs the internet. Bright stars stay from the Stellarium chart." + stored;
+    return "Gaia adds fainter stars and needs the internet. Bright stars stay from the Stellarium chart." + stored + pictures;
   }
-  return "Stellarium is stored on this computer, down to magnitude 7." + stored;
+  return "Stellarium is stored on this computer, down to magnitude 7." + stored + pictures;
 }
 
 function reloadSky(message) {
@@ -1409,6 +1442,16 @@ function chooseStarDepth() {
   const note = document.querySelector(".chart-note");
   if (note) note.textContent = chartNote();
   reloadSky(state.starDepth === 12 ? "Storing stars to magnitude 12…" : "Loading the sky map…");
+}
+
+function chooseSkyPictures() {
+  state.skyPictures = !state.skyPictures;
+  localStorage.setItem("seestar-skypics", state.skyPictures ? "1" : "0");
+  const button = document.querySelector("#sky-pictures");
+  if (button) button.classList.toggle("primary", state.skyPictures);
+  const note = document.querySelector(".chart-note");
+  if (note) note.textContent = chartNote();
+  reloadSky(state.skyPictures ? "Loading sky pictures…" : "Loading the sky map…");
 }
 
 function chooseStarChart(chart) {
@@ -1528,6 +1571,7 @@ function bind() {
     button.onclick = () => chooseStarChart(button.dataset.chart);
   });
   bindClick("#star-depth", () => chooseStarDepth());
+  bindClick("#sky-pictures", () => chooseSkyPictures());
   bindClick("#best-tonight", () => guard(loadBestTonight));
   bindClick("#sky-view", () => {
     const pick = state.skyPick;
