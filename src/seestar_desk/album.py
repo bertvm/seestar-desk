@@ -153,6 +153,19 @@ async def _page_names(session, page: int) -> list[dict[str, Any]]:
     return []
 
 
+async def delete_files(session, folder: str, names: list[str]) -> list[str]:
+    """Remove files the user already copied. The firmware method is delete_image."""
+    if not names:
+        raise ScopeError("Choose at least one file.")
+    folder_name = _safe_part(folder)
+    removed: list[str] = []
+    for name in names:
+        filename = _safe_part(name)
+        await session.command("delete_image", f"MyWorks/{folder_name}/{filename}")
+        removed.append(filename)
+    return removed
+
+
 def download_files(session, folder: str, names: list[str], dest: Path) -> list[str]:
     dest.mkdir(parents=True, exist_ok=True)
     saved: list[str] = []

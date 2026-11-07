@@ -29,6 +29,29 @@ Useful options:
 
 Stop it with Ctrl+C in that terminal.
 
+## Docker Compose
+
+Use this when the desk should run on a Docker host instead of a local server on the PC or Mac. The Docker host has to be on the same network as the telescope. Open the page from any browser at `http://<docker-host>:8731/`.
+
+From this folder, put the signature key where the container can read it, then start the service:
+
+```bash
+mkdir -p docker-data
+cp ~/.seestar-desk/seestar.pem docker-data/seestar.pem
+chmod 600 docker-data/seestar.pem
+docker compose up -d --build
+```
+
+The service uses the Docker host's own network, so telescope discovery still works. Remembered telescopes are stored in `docker-data/.seestar-desk/scopes.json`. Album copies are stored in `docker-data/Pictures/Seestar Desk`. `docker-data/` is not committed.
+
+```bash
+docker compose logs -f
+docker compose stop
+docker compose down
+```
+
+If the overview does not list the telescope, add it by its IP address. The key is mounted at runtime and is not built into the image.
+
 ## Use
 
 1. Turn the Seestar on and join its Wi-Fi, or put the telescope and this computer on the same home network.
@@ -36,11 +59,12 @@ Stop it with Ctrl+C in that terminal.
 3. On firmware that still uses a control lock, press **Claim** before moving the telescope. Current S50 Pro firmware has no lock; the button can stay as it is.
 4. Open a section from the left:
    - **Overview** shows link, battery, Wi-Fi, disk, and coordinates.
-   - **Sky** goes to a catalog target.
-   - **Picture** is live view, focus, filter, and stacking.
-   - **Align** switches the mount mode. Parking powers the telescope down, so use it only when you mean to.
-   - **Album** lists saved sessions. Tick the files you want, then download them. They land in `~/Pictures/Seestar Desk`.
-   - **Settings** holds location, clock, dew heater, and power.
+   - **Sky** goes to a catalog target, shows the slew progress, and nudges at slow, medium, or fast speed.
+   - **Picture** is live view and the growing stack, with kept frames, rejected frames, and elapsed time. It can also run a mosaic or a planet, moon, or scenery recording.
+   - **Align** switches the mount mode and shows the polar-alignment offset. Parking powers the telescope down, so use it only when you mean to.
+   - **Album** lists saved sessions. Select a whole folder, copy the files, and optionally delete them from the telescope afterwards. Copies land in `~/Pictures/Seestar Desk`.
+   - **Plan** is the night's list. It shows altitude, twilight, and cloud cover, then slews, focuses, and stacks each target. It skips a target that is too low, a battery that is too low, dawn, or heavy cloud. Parking at the end is off unless you tick it.
+   - **Settings** holds location, clock, dew heater, Wi-Fi, and power. Set the location before Plan can judge altitude and darkness.
 5. **Restart** and **Shut down** ask for confirmation, then power-cycle or turn off the telescope.
 
 The desk remembers telescopes in `~/.seestar-desk/scopes.json`.

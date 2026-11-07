@@ -1,4 +1,4 @@
-const pages = ["overview", "sky", "picture", "align", "album", "settings"];
+const pages = ["overview", "sky", "picture", "align", "album", "plan", "settings"];
 const state = {
   page: "overview",
   scopes: [],
@@ -14,6 +14,12 @@ const state = {
   seq: 0,
   error: "",
   query: "",
+  speed: 1500,
+  planItems: [],
+  networks: [],
+  skyPick: null,
+  skyEngine: null,
+  starChart: localStorage.getItem("seestar-starchart") === "gaia" ? "gaia" : "stellarium",
 };
 
 document.body.classList.toggle("theater", state.layout === "theater");
@@ -28,6 +34,7 @@ function show(page) {
     button.classList.toggle("active", button.dataset.page === page);
   });
   render();
+  if (page === "picture" && state.snap && state.snap.connected) startLive(state.camera || "tele");
 }
 
 async function api(path, options) {
@@ -64,6 +71,22 @@ async function guard(work) {
   } catch (error) {
     toast(error.message || String(error));
   }
+}
+
+function placeText(snap) {
+  const lat = Number(snap.latitude);
+  const lon = Number(snap.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "—";
+  const ns = lat >= 0 ? "N" : "S";
+  const ew = lon >= 0 ? "E" : "W";
+  return `${Math.abs(lat).toFixed(4)}° ${ns}, ${Math.abs(lon).toFixed(4)}° ${ew}`;
+}
+
+function coordValue(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return String(Math.round(number * 10000) / 10000);
 }
 
 function fmtNum(value, suffix) {
@@ -125,20 +148,30 @@ function svg(body, viewBox) {
   return `<svg viewBox="${viewBox || "0 0 24 24"}" aria-hidden="true">${body}</svg>`;
 }
 
-function iconScope(model) {
+function scopePicture(model) {
   const kind = scopeKind(model);
-  const tube = kind === "s30" ? 34 : 48;
-  const wide = kind === "s50pro"
-    ? `<circle cx="${28 + tube - 8}" cy="40" r="4.2" fill="#1b2430" stroke="currentColor" stroke-width="1.6"/>`
-    : "";
+  const file = { s30: "s30", s50: "s50", s50pro: "s50-pro" }[kind] || "s50";
+  return `<img src="/static/scopes/${file}.jpg?v=2" alt="${escapeHtml(scopeLabel(model))}">`;
+}
+
+function batteryMark(percent, charging) {
+  const known = percent !== null && percent !== undefined && percent !== "" && !Number.isNaN(Number(percent));
+  const level = known ? Math.max(0, Math.min(100, Number(percent))) : 0;
+  const bars = known && level > 0 ? Math.min(4, Math.ceil(level / 25)) : 0;
+  const edge = charging ? "#3ddc97" : "currentColor";
+  const cells = [0, 1, 2, 3].map((index) => {
+    const on = index < bars;
+    return `<rect x="${3.4 + index * 3.7}" y="8.7" width="2.9" height="6.6" rx="0.45" fill="currentColor" opacity="${on ? 1 : 0.2}"/>`;
+  }).join("");
   return svg(`
-    <ellipse cx="60" cy="62" rx="28" ry="5" fill="#10161f"/>
-    <path d="M42 58 V36 H54 V28" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
-    <rect x="28" y="20" width="${tube}" height="14" rx="7" fill="#1b2430" stroke="currentColor" stroke-width="1.8"/>
-    <circle cx="${28 + tube - 6}" cy="27" r="3.2" fill="#0c1016" stroke="currentColor" stroke-width="1.4"/>
-    ${wide}
-    <rect x="46" y="54" width="28" height="8" rx="3" fill="#1b2430" stroke="currentColor" stroke-width="1.6"/>
-  `, "0 0 120 72");
+    <rect x="1.4" y="6.6" width="18.2" height="10.8" rx="2.2" fill="none" stroke="${edge}" stroke-width="${charging ? 2.1 : 1.6}"/>
+    <rect x="20.3" y="9.8" width="2.1" height="4.4" rx="0.6" fill="${edge}"/>
+    ${cells}
+  `, "0 5.2 24 13.4");
+}
+
+function batteryBadge(percent, charging) {
+  return `${batteryMark(percent, charging)}<span>${escapeHtml(fmtNum(percent, "%"))}</span>`;
 }
 
 function iconBattery(percent) {
@@ -176,6 +209,61 @@ function iconDisk() {
   return svg(`<ellipse cx="12" cy="7" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 7v10c0 1.7 3.1 3 7 3s7-1.3 7-3V7" fill="none" stroke="currentColor" stroke-width="1.6"/>`);
 }
 
+function iconWifiBars(level) {
+  return svg([6, 9, 12, 15].map((height, index) => {
+    const y = 20 - height;
+    const on = index < level;
+    return `<rect x="${3 + index * 5}" y="${y}" width="3.2" height="${height}" rx="0.6" fill="currentColor" opacity="${on ? 1 : 0.28}"/>`;
+  }).join(""));
+}
+
+function iconTemp() {
+  return svg(`<path d="M10 13.4a3 3 0 1 0 4 0V6.4a2 2 0 1 0-4 0z" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="15.1" r="1.15" fill="currentColor"/>`);
+}
+
+function iconFirmware() {
+  return svg(`<rect x="7" y="7" width="10" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M9 3.5v3M15 3.5v3M9 17.5v3M15 17.5v3M3.5 9h3M3.5 15h3M17.5 9h3M17.5 15h3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>`);
+}
+
+function wifiBars(signal) {
+  const value = Number(signal);
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) {
+    if (value >= -55) return 4;
+    if (value >= -67) return 3;
+    if (value >= -75) return 2;
+    return value >= -85 ? 1 : 0;
+  }
+  if (value >= 75) return 4;
+  if (value >= 50) return 3;
+  if (value >= 30) return 2;
+  return value > 0 ? 1 : 0;
+}
+
+function signalText(signal) {
+  const value = Number(signal);
+  if (!Number.isFinite(value)) return "";
+  return value < 0 ? `${Math.round(value)} dBm` : `${Math.round(value)}%`;
+}
+
+function storageView(snap) {
+  if (snap.disk_free === null || snap.disk_free === undefined || snap.disk_free === "") {
+    return { text: "—", sub: "No storage report", pct: null, tone: "" };
+  }
+  const free = Number(snap.disk_free);
+  const total = Number(snap.disk_total);
+  if (!Number.isFinite(free)) return { text: "—", sub: "No storage report", pct: null, tone: "" };
+  const used = Number.isFinite(total) ? Math.max(0, total - free) : null;
+  const pct = used !== null && total > 0 ? Math.round((used / total) * 100) : null;
+  const tone = pct === null ? "" : pct > 90 ? "bad" : pct > 75 ? "warn" : "good";
+  return {
+    text: `${fmtDisk(free)} free`,
+    sub: pct === null ? "" : `${pct}% used · ${fmtDisk(total)}`,
+    pct,
+    tone,
+  };
+}
+
 function iconMark() {
   return svg(`<rect x="3" y="9" width="14" height="6" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="15" cy="12" r="1.4" fill="currentColor"/><path d="M8 15v3h8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>`);
 }
@@ -184,32 +272,45 @@ function meter(icon, value, title, tone) {
   return `<span class="meter ${tone || ""}" title="${escapeHtml(title)}">${icon}<b>${value}</b></span>`;
 }
 
+function statusCell(label, value, tone) {
+  return `<div class="stat ${tone || ""}"><span>${escapeHtml(label)}</span><b>${value}</b></div>`;
+}
+
 function paintMeters() {
   const snap = state.snap;
   const name = document.querySelector("#scope-name");
-  const meters = document.querySelector("#meters");
+  const status = document.querySelector("#statusline");
+  const skyline = document.querySelector("#skyline");
   const mark = document.querySelector("#brand-mark");
   if (!snap) {
     name.textContent = "No telescope";
-    meters.innerHTML = "";
+    if (status) status.innerHTML = statusCell("Telescope", "Not connected", "dim");
+    if (skyline) skyline.innerHTML = `<strong>Connect a telescope</strong><span>Turn it on and search this network.</span>`;
     if (mark) mark.innerHTML = iconMark();
     return;
   }
   name.textContent = `${snap.name || snap.host}${snap.model ? " · " + snap.model : ""}`;
-  if (mark) mark.innerHTML = iconScope(snap.model);
+  if (mark) mark.innerHTML = scopePicture(snap.model);
   const battery = Number(snap.battery);
   const batteryTone = Number.isNaN(battery) ? "dim" : battery < 20 ? "bad" : battery < 40 ? "warn" : "good";
   const linkMode = snap.connected ? (snap.master ? "control" : "watch") : "off";
   const linkText = linkMode === "control" ? "In control" : linkMode === "watch" ? "Watching" : "Offline";
   const linkTone = linkMode === "control" ? "good" : linkMode === "watch" ? "warn" : "dim";
-  meters.innerHTML = [
-    meter(iconLink(linkMode), linkText, "Link", linkTone),
-    meter(iconBattery(snap.battery), fmtNum(snap.battery, "%"), "Battery", batteryTone),
-    meter(iconDisk(), fmtDisk(snap.disk_free), "Free space", ""),
-    meter(iconWifi(Boolean(snap.wifi)), escapeHtml(snap.wifi || "—"), "Wi-Fi", snap.wifi ? "good" : "dim"),
-    meter(svg(`<text x="3" y="16" font-size="11" font-family="Palatino, Georgia, serif" fill="currentColor">α</text>`), fmtRA(snap.ra), "Right ascension", ""),
-    meter(svg(`<text x="4" y="16" font-size="11" font-family="Palatino, Georgia, serif" fill="currentColor">δ</text>`), fmtDec(snap.dec), "Declination", ""),
-  ].join("");
+  const sky = (snap.plan && snap.plan.sky) || {};
+  const skyTitle = sky.darkness ? sky.darkness.charAt(0).toUpperCase() + sky.darkness.slice(1) : "Seestar Desk";
+  if (skyline) {
+    skyline.innerHTML = `<strong>${escapeHtml(skyTitle)}</strong><span>${escapeHtml(placeText(snap) === "—" ? (snap.model || "Ready when you are") : placeText(snap))}</span>`;
+  }
+  if (status) {
+    status.innerHTML = [
+      statusCell("Telescope", escapeHtml(scopeLabel(snap.model)), ""),
+      statusCell("Link", escapeHtml(linkText), linkTone),
+      statusCell("Wi-Fi", escapeHtml(signalText(snap.wifi_signal) || snap.wifi || "—"), snap.wifi ? "good" : "dim"),
+      statusCell("Activity", escapeHtml(activityText(snap)), ""),
+      statusCell("Mount", escapeHtml(snap.equatorial ? "Equatorial" : snap.equatorial === false ? "Alt-az" : "—"), ""),
+      statusCell("Battery", escapeHtml(`${fmtNum(snap.battery, "%")}${snap.charging ? " · charging" : ""}`), batteryTone),
+    ].join("");
+  }
   document.querySelectorAll("[data-field]").forEach((node) => {
     const key = node.dataset.field;
     if (key === "ra") node.textContent = fmtRA(snap.ra);
@@ -221,32 +322,132 @@ function paintMeters() {
     else if (key === "target") node.textContent = snap.target || "—";
     else if (key === "mode") node.textContent = snap.mode || "—";
     else if (key === "stack") node.textContent = stackText(snap);
+    else if (key === "goto") node.textContent = gotoText(snap);
+    else if (key === "activity") node.textContent = activityText(snap);
+    else if (key === "place") node.textContent = placeText(snap);
+    else if (key === "link") node.textContent = `${linkText}${snap.host ? " · " + snap.host : ""}`;
+    else if (key === "wifi-line") node.textContent = [snap.wifi || "—", signalText(snap.wifi_signal), snap.ip].filter(Boolean).join(" · ");
+    else if (key === "storage-line") node.textContent = storageView(snap).text;
     else if (key === "align") node.textContent = alignText(snap);
+    else if (key === "plan") node.textContent = planStatus(snap);
     else if (key === "tracking") node.textContent = snap.tracking ? "On" : "Off";
     else if (key === "mount") node.textContent = snap.equatorial ? "Equatorial" : "Alt-az";
   });
-  const stage = document.querySelector("#stage");
-  const seq = snap.frame_seq && snap.frame_seq[state.camera];
-  if (stage && seq && stage.dataset.seq !== String(seq)) {
-    stage.dataset.seq = String(seq);
-    stage.src = `${scopePath("/frame.jpg")}?camera=${state.camera}&seq=${seq}`;
+  const liveSeq = snap.frame_seq && snap.frame_seq[state.camera];
+  const stackSeq = snap.frame_seq && snap.frame_seq.stack;
+  showFrame("#stage", liveSeq || stackSeq, liveSeq ? state.camera : "stack");
+  showFrame("#stack-stage", stackSeq, "stack");
+  const plot = document.querySelector("#pa-plot .dot");
+  const align = snap.align || {};
+  const ax = Number(align.x ?? align.eq_offset_az);
+  const ay = Number(align.y ?? align.eq_offset_alt);
+  if (plot && !Number.isNaN(ax) && !Number.isNaN(ay)) {
+    plot.style.left = `${50 + Math.max(-1, Math.min(1, ax / 3)) * 40}%`;
+    plot.style.top = `${50 + Math.max(-1, Math.min(1, -ay / 3)) * 40}%`;
   }
+  const tonight = document.querySelector("#tonight-list");
+  if (tonight) tonight.innerHTML = tonightHtml(snap);
+  const conditions = document.querySelector("#conditions");
+  if (conditions) conditions.innerHTML = conditionsHtml(snap);
   drawRose();
+  paintReadings();
+  const badge = document.querySelector("[data-battery]");
+  if (badge) {
+    badge.classList.toggle("charging", Boolean(snap.charging));
+    badge.title = `${fmtNum(snap.battery, "%")}${snap.charging ? ", charging" : ""}`;
+    badge.innerHTML = batteryBadge(snap.battery, snap.charging);
+  }
+  syncSkyObserver();
+}
+
+function paintReadings() {
+  const root = document.querySelector("[data-readings]");
+  if (!root || !state.snap || root.dataset.readings !== state.snap.id) return;
+  root.innerHTML = readingsHtml(state.snap);
+}
+
+function showFrame(selector, seq, camera) {
+  const stage = document.querySelector(selector);
+  if (!stage || !seq || stage.dataset.seq === String(seq)) return;
+  stage.dataset.seq = String(seq);
+  stage.src = `${scopePath("/frame.jpg")}?camera=${camera}&seq=${seq}`;
+  const empty = document.querySelector(`${selector}-empty`);
+  if (empty) empty.hidden = true;
+}
+
+function activityText(snap) {
+  const phase = String((snap.stack || {}).state || "");
+  if (["start", "working", "stacking"].includes(phase)) {
+    return `Taking pictures${snap.target ? " · " + snap.target : ""}`;
+  }
+  if (snap.parked) return "Parked";
+  const view = snap.view || {};
+  if (view.state && !["complete", "cancel", "idle"].includes(String(view.state))) return gotoText(snap);
+  return "Ready";
+}
+
+function tonightHtml(snap) {
+  const items = (snap.plan && snap.plan.items) || [];
+  if (!items.length) return `<p class="muted">No targets yet. Choose them on the Plan page.</p>`;
+  return items.slice(0, 6).map((item) => `
+    <div class="night-row"><b>${escapeHtml(item.name || "Target")}</b><span class="muted">${escapeHtml(item.minutes ? `${item.minutes} min` : "")}</span></div>
+  `).join("");
+}
+
+function conditionsHtml(snap) {
+  const weather = (snap.plan && snap.plan.weather) || {};
+  const sky = (snap.plan && snap.plan.sky) || {};
+  const rows = [
+    ["Place", placeText(snap)],
+    ["Clock", snap.clock || "—"],
+    ["Sky", sky.darkness || "—"],
+    ["Cloud", weather.cloud_cover === undefined || weather.cloud_cover === null ? "—" : `${Math.round(weather.cloud_cover)}%`],
+    ["Temperature", snap.temperature === null || snap.temperature === undefined || snap.temperature === "" ? "—" : `${fmtNum(snap.temperature, "°")}`],
+    ["Storage", storageView(snap).text],
+  ];
+  return rows.map(([label, value]) => `<div class="cond-row"><span class="muted">${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("");
 }
 
 function stackText(snap) {
   const stack = snap.stack || {};
-  const count = stack.stack_count ?? stack.stacked_frame ?? "";
+  const kept = stack.stacked ?? "";
+  const dropped = stack.dropped ?? "";
   const phase = stack.state || "";
-  return [phase, count !== "" ? `${count} frames` : ""].filter(Boolean).join(" · ") || "Idle";
+  return [
+    phase,
+    kept !== "" ? `${kept} kept` : "",
+    dropped !== "" ? `${dropped} rejected` : "",
+    formatElapsed(stack.elapsed),
+  ].filter(Boolean).join(" · ") || "Idle";
+}
+
+function formatElapsed(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  const whole = Math.round(value);
+  const minutes = Math.floor(whole / 60);
+  return `${minutes}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function gotoText(snap) {
+  const view = snap.view || {};
+  return [view.stage, view.state, view.percent !== undefined && view.percent !== null ? `${view.percent}%` : "", view.error]
+    .filter((part) => part !== undefined && part !== null && part !== "" && part !== "none")
+    .join(" · ") || "Waiting for a slew";
 }
 
 function alignText(snap) {
   const align = snap.align || {};
-  if (!align.Event && align.state_code === undefined && !align.state) return "Not started";
-  return [align.Event, align.state, align.state_code !== undefined ? `step ${align.state_code}` : ""]
-    .filter((part) => part !== undefined && part !== "")
-    .join(" · ");
+  if (!align.Event && align.state_code === undefined && !align.state && align.x === undefined) return "Not started";
+  const x = align.x ?? align.eq_offset_az;
+  const y = align.y ?? align.eq_offset_alt;
+  return [
+    align.Event,
+    align.state,
+    align.state_code !== undefined ? `step ${align.state_code}` : "",
+    x !== undefined ? `azimuth ${Number(x).toFixed(2)}°` : "",
+    y !== undefined ? `altitude ${Number(y).toFixed(2)}°` : "",
+  ].filter((part) => part !== undefined && part !== "").join(" · ");
 }
 
 function filterName(position) {
@@ -256,6 +457,7 @@ function filterName(position) {
 function banner() {
   const snap = state.snap;
   if (state.error) return `<div class="banner bad">${escapeHtml(state.error)}</div>`;
+  if (state.page === "picture" && snap && snap.live_error) return `<div class="banner bad">${escapeHtml(snap.live_error)}</div>`;
   if (!snap || !snap.connected) return `<div class="banner">Connect a telescope on Overview. The Seestar app has to be on the same Wi-Fi, in station mode.</div>`;
   if (!snap.master) return `<div class="banner">This computer is watching. Claim control before a slew, focus move, or exposure. If the Seestar app still holds the session, release it there first.</div>`;
   if (snap.last_error) return `<div class="banner bad">${escapeHtml(snap.last_error)}</div>`;
@@ -274,6 +476,7 @@ function render() {
     picture: renderPicture,
     align: renderAlign,
     album: renderAlbum,
+    plan: renderPlan,
     settings: renderSettings,
   }[state.page];
   main.innerHTML = view();
@@ -281,44 +484,173 @@ function render() {
   paintMeters();
 }
 
-function renderOverview() {
-  const cards = state.scopes.map((scope) => `
-    <article class="scope-card">
-      <div class="scope-art ${scopeKind(scope.model)}" title="${escapeHtml(scopeLabel(scope.model))}">${iconScope(scope.model)}</div>
-      <header>
-        <div>
-          <h2>${escapeHtml(scope.name || scope.host)}</h2>
-          <div class="muted">${escapeHtml(scope.model || scopeLabel(scope.model))} · ${escapeHtml(scope.host)}</div>
-        </div>
-        <span class="pill ${scope.connected ? "good" : ""}">${iconLink(scope.connected ? "control" : "off")} ${scope.connected ? "Linked" : "Available"}</span>
-      </header>
-      <div class="actions">
-        <button class="primary" data-connect="${escapeHtml(scope.id)}">${scope.connected && scope.id === state.selected ? "Connected" : "Connect"}</button>
-        <button data-claim="${escapeHtml(scope.id)}">Claim control</button>
-        <button data-release="${escapeHtml(scope.id)}">Release</button>
-        <button class="warn" data-power="restart" data-id="${escapeHtml(scope.id)}">Restart</button>
-        <button class="danger" data-power="shutdown" data-id="${escapeHtml(scope.id)}">Shut down</button>
-      </div>
-    </article>`).join("");
+function scopeSnap(scope) {
+  if (!state.snap || state.snap.id !== scope.id) return scope;
+  return { ...scope, ...state.snap };
+}
+
+function reading(icon, label, value, sub, extra) {
+  return `<div class="reading"><div class="label">${icon}<span>${escapeHtml(label)}</span></div><strong>${value}</strong>${sub ? `<div class="sub">${sub}</div>` : ""}${extra || ""}</div>`;
+}
+
+function readingsHtml(snap) {
+  const battery = Number(snap.battery);
+  const batteryTone = Number.isNaN(battery) ? "dim" : battery < 20 ? "bad" : battery < 40 ? "warn" : "good";
+  const linkMode = snap.master ? "control" : "watch";
+  const linkText = snap.master ? "In control" : "Watching";
+  const activity = [snap.target, snap.mode, snap.parked ? "Parked" : "", snap.equatorial === true ? "Equatorial" : snap.equatorial === false ? "Alt-az" : ""]
+    .filter(Boolean).join(" · ");
+  const bars = wifiBars(snap.wifi_signal);
+  const address = snap.ip || snap.host || "—";
+  const storage = storageView(snap);
+  const storageBar = storage.pct === null ? "" : `<div class="bar ${storage.tone}"><span style="width:${storage.pct}%"></span></div>`;
+  const batteryBar = Number.isNaN(battery) ? "" : `<div class="bar ${batteryTone}"><span style="width:${Math.max(0, Math.min(100, battery))}%"></span></div>`;
+  const tiles = [
+    reading(iconLink(linkMode), "Status", escapeHtml(linkText), escapeHtml(activity || "Idle")),
+    reading(iconBattery(snap.battery), "Battery", `${fmtNum(snap.battery, "%")}${snap.charging ? " · charging" : ""}`, "", batteryBar),
+    reading(iconWifiBars(bars), "Wi-Fi", escapeHtml(snap.wifi || "—"), `${escapeHtml(signalText(snap.wifi_signal))}${signalText(snap.wifi_signal) ? " · " : ""}${escapeHtml(address)}`),
+    reading(iconDisk(), "Storage", escapeHtml(storage.text), escapeHtml(storage.sub), storageBar),
+    reading(iconFirmware(), "Firmware", escapeHtml(snap.firmware_label || snap.firmware || "—"), escapeHtml(scopeLabel(snap.model))),
+    reading(svg(`<circle cx="12" cy="12" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>`), "Pointing", fmtRA(snap.ra), fmtDec(snap.dec)),
+  ];
+  if (snap.temperature !== null && snap.temperature !== undefined && snap.temperature !== "") {
+    tiles.push(reading(iconTemp(), "Temperature", `${fmtNum(snap.temperature, "°")}`, "Telescope"));
+  }
+  return tiles.join("");
+}
+
+function scopeActions(scope) {
   return `
-    <div class="page-head"><h1>Telescopes</h1>
-      <button class="primary" id="find">Find Seestars</button></div>
+    <div class="actions">
+      <button class="primary" data-connect="${escapeHtml(scope.id)}">${scope.connected && scope.id === state.selected ? "Connected" : "Connect"}</button>
+      <button data-claim="${escapeHtml(scope.id)}">Claim control</button>
+      <button data-release="${escapeHtml(scope.id)}">Release</button>
+      <button class="warn" data-power="restart" data-id="${escapeHtml(scope.id)}">Restart</button>
+      <button class="danger" data-power="shutdown" data-id="${escapeHtml(scope.id)}">Shut down</button>
+    </div>`;
+}
+
+function renderOverview() {
+  const scopes = state.scopes.map(scopeSnap);
+  const current = scopes.find((scope) => scope.connected && scope.id === state.selected) || null;
+  const others = scopes.filter((scope) => !current || scope.id !== current.id);
+  const otherRows = others.map((scope) => `
+    <div class="night-row">
+      <span>${escapeHtml(scope.name || scope.host)} <span class="muted">${escapeHtml(scope.host)}</span></span>
+      <button data-connect="${escapeHtml(scope.id)}">Connect</button>
+    </div>`).join("");
+  const hero = current ? `
+    <div class="scope-hero">
+      ${scopePicture(current.model)}
+      <div>
+        <h2>${escapeHtml(scopeLabel(current.model))}</h2>
+        <div data-field="link">${escapeHtml(current.master ? "In control" : "Watching")} · ${escapeHtml(current.host)}</div>
+        <div class="muted" data-field="place">${escapeHtml(placeText(current))}</div>
+      </div>
+      <div class="batt-badge${current.charging ? " charging" : ""}" data-battery title="${escapeHtml(`${fmtNum(current.battery, "%")}${current.charging ? ", charging" : ""}`)}">${batteryBadge(current.battery, current.charging)}</div>
+    </div>
+    <div class="wifi-box">
+      <div class="kicker">Wi-Fi</div>
+      <b data-field="wifi-line">${escapeHtml([current.wifi || "—", signalText(current.wifi_signal), current.ip].filter(Boolean).join(" · "))}</b>
+      <div class="muted" data-field="storage-line">${escapeHtml(storageView(current).text)}</div>
+    </div>
+    ${scopeActions(current)}` : `
+    <p class="muted">No telescope is connected. Turn it on, then search this network.</p>
+    ${otherRows || ""}`;
+  return `
     ${banner()}
-    <div class="scope-list">${cards || `<div class="card">None found yet. Search the network, or type an address.</div>`}</div>
-    <form class="card form" id="manual" style="margin-top:0.8rem">
+    <section class="panel">
+      <p class="kicker">Start here</p>
+      <h2>Three steps to the first picture</h2>
+      <div class="steps">
+        <button class="step" data-find="1"><b>1. Connect the telescope</b><span>Turn it on. Desk searches this network.</span></button>
+        <button class="step" id="open-sky"><b>2. Choose a target</b><span>Pick an object on the sky page.</span></button>
+        <button class="step" id="open-picture"><b>3. Start the session</b><span>Focus, expose, and stack.</span></button>
+      </div>
+      <button class="primary wide" id="open-sky-wide">Open the sky</button>
+    </section>
+    <section class="board">
+      <article class="panel">
+        <p class="kicker">Telescope</p>
+        <h2>${escapeHtml(current ? (current.name || "My telescope") : "My telescope")}</h2>
+        ${hero}
+        ${current && otherRows ? `<div class="wifi-box">${otherRows}</div>` : ""}
+      </article>
+      <article class="panel">
+        <p class="kicker">Current target</p>
+        <h2>Observation</h2>
+        <div class="stage dash">
+          <img id="stage" alt="Latest view from the telescope">
+          <div class="placeholder" id="stage-empty">No target selected</div>
+        </div>
+        <div class="night-row"><b data-field="target">${escapeHtml((current && current.target) || "No target selected")}</b><span class="muted" data-field="goto">${escapeHtml(current ? gotoText(current) : "")}</span></div>
+      </article>
+      <article class="panel">
+        <p class="kicker">Live stack</p>
+        <h2>Stacked image</h2>
+        <div class="stage dash">
+          <img id="stack-stage" alt="Latest stacked frame">
+          <div class="placeholder" id="stack-stage-empty">The stack appears here</div>
+        </div>
+        <div class="night-row"><b data-field="stack">${escapeHtml(current ? stackText(current) : "Idle")}</b></div>
+        <div class="actions">
+          <button class="primary" id="stack-start">Start stack</button>
+          <button id="stack-stop">Stop stack</button>
+        </div>
+      </article>
+    </section>
+    <section class="board two">
+      <article class="panel">
+        <p class="kicker">Planning for tonight</p>
+        <div class="row"><h2>Your night</h2><button id="open-plan">Open the plan</button></div>
+        <div id="tonight-list">${current ? tonightHtml(current) : `<p class="muted">Connect a telescope to plan the night.</p>`}</div>
+      </article>
+      <article class="panel">
+        <p class="kicker">Conditions</p>
+        <h2>Tonight</h2>
+        <div id="conditions">${current ? conditionsHtml(current) : `<p class="muted">Location, sky, and weather appear after you connect.</p>`}</div>
+      </article>
+    </section>
+    <form class="manual-add form" id="manual">
       <label>IP address<input name="host" placeholder="192.168.1.50" required></label>
       <label>Name<input name="name" placeholder="Back garden"></label>
-      <div class="actions"><button class="primary" type="submit">Add telescope</button></div>
+      <div class="actions"><button type="button" id="find">Find telescopes</button><button class="primary" type="submit">Add telescope</button></div>
     </form>`;
 }
 
 function renderSky() {
   return `
-    <div class="page-head"><h1>Sky</h1><div class="muted">Pointing <span data-field="target"></span></div></div>
+    <div class="page-head">
+      <h1>Sky</h1>
+      <div class="chart-switch">
+        <button type="button" data-chart="stellarium" class="${state.starChart === "gaia" ? "" : "primary"}">Stellarium</button>
+        <button type="button" data-chart="gaia" class="${state.starChart === "gaia" ? "primary" : ""}">Gaia</button>
+      </div>
+    </div>
+    <p class="muted chart-note">${state.starChart === "gaia" ? "Gaia adds faint stars and needs the internet. Bright stars stay from the Stellarium chart." : "Stellarium is stored on this computer, down to magnitude 7."}</p>
     ${banner()}
+    <div class="skymap-wrap card">
+      <canvas id="skymap" class="skymap"></canvas>
+      <div class="placeholder" id="skymap-status">Loading the sky map…</div>
+    </div>
+    <div class="card sky-pick" id="sky-pick">
+      <div>
+        <h2 id="sky-pick-name">Click an object</h2>
+        <p class="muted" id="sky-pick-detail">The map uses the telescope’s saved place and clock. View now points the telescope. Add to tonight puts it on the plan.</p>
+      </div>
+      <div class="actions">
+        <button class="primary" id="sky-view" type="button" disabled>View now</button>
+        <button id="sky-plan" type="button" disabled>Add to tonight</button>
+        <button id="best-tonight" type="button">Best tonight</button>
+      </div>
+    </div>
+    <section class="card tonight" id="tonight-card" hidden>
+      <h2>Best tonight</h2>
+      <p class="muted" id="tonight-note"></p>
+      <div class="list" id="best-list"></div>
+    </section>
     <div class="work">
       <section class="card">
-        <canvas class="rose" id="rose" width="640" height="280"></canvas>
         <div class="row">
           <div>Right ascension <b data-field="ra"></b></div>
           <div>Declination <b data-field="dec"></b></div>
@@ -326,6 +658,7 @@ function renderSky() {
           <div>Azimuth <b data-field="az"></b></div>
           <div>Tracking <b data-field="tracking"></b></div>
         </div>
+        <p>GoTo <b data-field="goto"></b></p>
         <div class="actions">
           <button id="track-on">Track on</button>
           <button id="track-off">Track off</button>
@@ -338,7 +671,12 @@ function renderSky() {
         <div class="card">
           <h2>Nudge</h2>
           <div class="pad" id="pad"><span class="n">up</span><span class="e">right</span><span class="s">down</span><span class="w">left</span></div>
-          <div class="muted">Press and hold. Speed is a short sidereal nudge.</div>
+          <div class="actions">
+            <button data-speed="400" class="${state.speed === 400 ? "primary" : ""}">Slow</button>
+            <button data-speed="1500" class="${state.speed === 1500 ? "primary" : ""}">Medium</button>
+            <button data-speed="3500" class="${state.speed === 3500 ? "primary" : ""}">Fast</button>
+          </div>
+          <div class="muted">Press and hold. Slow is for centering, fast is for a bigger jump.</div>
         </div>
         <form class="card" id="goto">
           <h2>Go to</h2>
@@ -377,15 +715,35 @@ function renderPicture() {
     </div>
     ${banner()}
     <div class="work">
-      <div class="stage">
-        <img id="stage" alt="Latest frame from the telescope">
-        <div class="overlay">
-          <span class="card" style="padding:0.35rem 0.6rem"><span data-field="target"></span> · <span data-field="stack"></span></span>
+      <div>
+        <div class="stages">
+          <div class="stage">
+            <img id="stage" alt="">
+            <div class="placeholder" id="stage-empty">Opening the camera…</div>
+            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Live · <span data-field="target"></span></span></div>
+          </div>
+          <div class="stage">
+            <img id="stack-stage" alt="Latest stacked frame">
+            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Stack · <span data-field="stack"></span></span></div>
+          </div>
+        </div>
+        <div class="nudge card">
+          <div class="pad" id="pad"><span class="n">up</span><span class="e">right</span><span class="s">down</span><span class="w">left</span></div>
+          <div>
+            <h2>Nudge</h2>
+            <div class="actions">
+              <button data-speed="400" class="${state.speed === 400 ? "primary" : ""}">Slow</button>
+              <button data-speed="1500" class="${state.speed === 1500 ? "primary" : ""}">Medium</button>
+              <button data-speed="3500" class="${state.speed === 3500 ? "primary" : ""}">Fast</button>
+            </div>
+            <div class="muted">Press and hold. Slow is for centering, fast is for a bigger jump.</div>
+          </div>
         </div>
       </div>
       <div class="cards">
         <div class="card">
           <h2>Exposure</h2>
+          <div>Stack <b data-field="stack"></b></div>
           <div class="muted">Mode <b data-field="mode"></b></div>
           <div class="form">
             <label>Gain<input id="gain" type="number" value="80" min="0" max="400"></label>
@@ -417,6 +775,34 @@ function renderPicture() {
             <button data-filter="0">Dark</button>
           </div>
         </div>
+        <form class="card" id="mosaic">
+          <h2>Mosaic</h2>
+          <p class="muted">Several panels around the current coordinates, each stacked for the minutes you set.</p>
+          <div class="form">
+            <label>Rows<input name="rows" type="number" min="1" max="6" value="2"></label>
+            <label>Columns<input name="cols" type="number" min="1" max="6" value="2"></label>
+            <label>Overlap %<input name="overlap" type="number" min="0" max="60" value="20"></label>
+            <label>Minutes each<input name="minutes" type="number" min="0" step="0.5" value="10"></label>
+          </div>
+          <div class="actions"><button class="primary" type="submit">Run mosaic</button></div>
+        </form>
+        <form class="card" id="video">
+          <h2>Planet or scenery</h2>
+          <div class="form">
+            <label>Mode
+              <select name="mode">
+                <option value="planet">Planet</option>
+                <option value="moon">Moon</option>
+                <option value="scenery">Scenery</option>
+              </select>
+            </label>
+            <label>Minutes<input name="minutes" type="number" min="0" step="0.5" value="3"></label>
+          </div>
+          <div class="actions">
+            <button class="primary" type="submit">Start recording</button>
+            <button type="button" id="video-stop">Stop</button>
+          </div>
+        </form>
       </div>
     </div>`;
 }
@@ -450,6 +836,8 @@ function renderAlign() {
           <button id="align-recheck">Recheck</button>
           <button id="align-stop">Stop</button>
         </div>
+        <div class="crosshair" id="pa-plot" title="Bring the dot to the center with the wedge knobs"><span class="dot"></span></div>
+        <p class="muted">The dot is the offset the telescope reports. Azimuth is left and right, altitude is up and down. Turn the wedge knobs until it sits in the center.</p>
       </section>
     </div>`;
 }
@@ -462,7 +850,7 @@ function renderAlbum() {
     </button>`).join("");
   const files = state.files.map((file) => file.is_dir ? `
     <div class="file"><span>${escapeHtml(file.name)}</span><span class="muted">Folder</span></div>` : `
-    <label class="file"><span><input type="checkbox" name="file" value="${escapeHtml(file.name)}"> ${escapeHtml(file.name)}</span>
+    <label class="file"><span>${fileThumb(file)}<input type="checkbox" name="file" value="${escapeHtml(file.name)}"> ${escapeHtml(file.name)}</span>
       <span class="muted">${file.size_k ? file.size_k + " KB" : ""}</span></label>`).join("");
   const thumbs = state.folders.map((folder) => folder.thumb ? `
     <figure>
@@ -478,9 +866,96 @@ function renderAlbum() {
       <section class="card">
         <h2>${escapeHtml(state.folder || "Files")}</h2>
         <div class="list">${files}</div>
-        <div class="actions"><button class="primary" id="copy">Copy selected to this computer</button></div>
+        <div class="actions">
+          <button type="button" id="select-all">Select all files</button>
+          <button class="primary" id="copy">Copy selected to this computer</button>
+        </div>
+        <label class="row"><input id="delete-after" type="checkbox"> Delete the selected files from the telescope after the copy</label>
       </section>
     </div>`;
+}
+
+function fileThumb(file) {
+  const name = String(file.name || "");
+  let preview = "";
+  if (/\.(jpg|jpeg|png)$/i.test(name)) preview = name;
+  else if (name.toLowerCase().endsWith(".fit")) {
+    const thumb = `${name.slice(0, -4)}_thn.jpg`;
+    if (state.files.some((item) => item.name === thumb)) preview = thumb;
+  }
+  if (!preview || !state.folder) return "";
+  const path = `MyWorks/${state.folder}/${preview}`;
+  return `<img class="mini" alt="" src="${scopePath("/media")}?path=${encodeURIComponent(path)}">`;
+}
+
+function planStatus(snap) {
+  const plan = (snap && snap.plan) || {};
+  const status = plan.status || {};
+  const sky = plan.sky || {};
+  return [status.step, status.detail, sky.darkness].filter(Boolean).join(" · ") || "Idle";
+}
+
+function renderPlan() {
+  const plan = (state.snap && state.snap.plan) || {};
+  const safety = plan.safety || { min_battery: 20, min_altitude: 25, stop_before_dawn: true, max_cloud: 80 };
+  const weather = plan.weather || {};
+  const sky = plan.sky || {};
+  const rows = state.planItems.map((item, index) => `
+    <div class="file">
+      <span>${escapeHtml(item.name)} · ${escapeHtml(item.mode)} · ${item.minutes} min${item.rows > 1 || item.cols > 1 ? ` · ${item.rows}×${item.cols}` : ""}</span>
+      <span class="muted">${item.altitude === undefined || item.altitude === null ? "" : item.altitude + "°"}${item.reasons && item.reasons.length ? " · " + escapeHtml(item.reasons[0]) : ""}</span>
+      <button type="button" data-drop="${index}">Remove</button>
+    </div>`).join("");
+  const clouds = weather.cloud_cover === undefined || weather.cloud_cover === null ? "—" : `${weather.cloud_cover}% cloud`;
+  return `
+    <div class="page-head"><h1>Plan</h1><div class="muted" data-field="plan"></div></div>
+    ${banner()}
+    <section class="card">
+      <h2>Tonight</h2>
+      <p>${escapeHtml(sky.note || sky.darkness || "Sky not checked yet.")}${sky.sun_altitude !== undefined && sky.sun_altitude !== null ? ` · sun ${sky.sun_altitude}°` : ""}</p>
+      <p class="muted">${escapeHtml(weather.error || `${clouds}${weather.wind_speed !== undefined && weather.wind_speed !== null ? ` · wind ${weather.wind_speed} m/s` : ""}${weather.precipitation ? ` · rain ${weather.precipitation} mm` : ""}`)}</p>
+      <div class="actions"><button id="weather" type="button">Refresh sky and weather</button></div>
+    </section>
+    <form class="card" id="plan-add" style="margin-top:0.8rem">
+      <h2>Add a target</h2>
+      <label>Search<input id="plan-query" placeholder="M31, Orion"></label>
+      <div class="list" id="plan-results"></div>
+      <div class="form">
+        <label>Name<input name="name" id="plan-name" required></label>
+        <label>RA hours<input name="ra" id="plan-ra" required></label>
+        <label>Dec °<input name="dec" id="plan-dec" required></label>
+        <label>Mode
+          <select name="mode">
+            <option value="star">Deep sky</option>
+            <option value="planet">Planet</option>
+            <option value="moon">Moon</option>
+            <option value="scenery">Scenery</option>
+          </select>
+        </label>
+        <label>Minutes<input name="minutes" type="number" min="0" step="0.5" value="15"></label>
+        <label>Rows<input name="rows" type="number" min="1" max="6" value="1"></label>
+        <label>Columns<input name="cols" type="number" min="1" max="6" value="1"></label>
+        <label>Overlap %<input name="overlap" type="number" min="0" max="60" value="20"></label>
+        <label>Gain<input name="gain" type="number" value="80"></label>
+      </div>
+      <label class="row"><input name="autofocus" type="checkbox" checked> Autofocus before each panel</label>
+      <div class="actions"><button class="primary" type="submit">Add to the list</button></div>
+    </form>
+    <section class="card" style="margin-top:0.8rem">
+      <h2>List</h2>
+      <div class="list">${rows || '<div class="muted">No targets yet.</div>'}</div>
+      <label class="row"><input id="park-end" type="checkbox"> Park when the list finishes. This powers the telescope down.</label>
+      <div class="form">
+        <label>Stop below battery %<input id="min-battery" type="number" min="0" max="100" value="${safety.min_battery ?? 20}"></label>
+        <label>Stop below altitude °<input id="min-altitude" type="number" value="${safety.min_altitude ?? 25}"></label>
+        <label>Skip above cloud %<input id="max-cloud" type="number" min="0" max="100" value="${safety.max_cloud ?? 80}"></label>
+      </div>
+      <label class="row"><input id="stop-dawn" type="checkbox" ${safety.stop_before_dawn === false ? "" : "checked"}> Stop when the sky is no longer dark</label>
+      <div class="actions">
+        <button class="primary" id="plan-start" type="button">Run the list</button>
+        <button id="plan-stop" type="button">Stop</button>
+      </div>
+    </section>`;
 }
 
 function renderSettings() {
@@ -495,15 +970,28 @@ function renderSettings() {
     ${banner()}
     <form class="card" id="site">
       <h2>Place and clock</h2>
+      <p class="muted">Saved place <b>${escapeHtml(placeText(snap))}</b></p>
+      <p class="muted">Telescope clock <b>${escapeHtml(snap.clock || "—")}</b></p>
       <div class="form">
-        <label>Latitude<input name="lat" placeholder="51.5"></label>
-        <label>Longitude<input name="lon" placeholder="-0.12"></label>
+        <label>Latitude<input name="lat" value="${coordValue(snap.latitude)}" placeholder="51.5"></label>
+        <label>Longitude<input name="lon" value="${coordValue(snap.longitude)}" placeholder="-0.12"></label>
       </div>
       <div class="actions">
         <button class="primary" type="submit">Save location</button>
         <button type="button" id="set-clock">Set the telescope clock from this computer</button>
       </div>
     </form>
+    <section class="card" style="margin-top:0.8rem">
+      <h2>Wi-Fi</h2>
+      <p class="muted">Current network <b>${escapeHtml((snap.station && snap.station.ssid) || snap.wifi || "—")}</b>. Joining a network makes the telescope leave the one it is on now.</p>
+      <div class="actions"><button id="wifi-scan" type="button">Scan networks</button></div>
+      <div class="list" id="wifi-list">${state.networks.map((item) => `<button type="button" data-ssid="${escapeHtml(item.ssid)}">${escapeHtml(item.ssid)} <span class="muted">${item.rssi ?? ""}</span></button>`).join("")}</div>
+      <form class="form" id="wifi-join">
+        <label>Network<input name="ssid" id="wifi-ssid" required></label>
+        <label>Password<input name="password" type="password"></label>
+        <div class="actions"><button class="primary" type="submit">Join</button></div>
+      </form>
+    </section>
     <section class="card" style="margin-top:0.8rem">
       <h2>Power</h2>
       <p class="muted">Restart drops the link and the telescope comes back by itself. Shut down powers it off until you switch it on.</p>
@@ -535,9 +1023,231 @@ function renderSettings() {
     </section>`;
 }
 
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${url}"]`)) {
+      resolve();
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = url;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("The sky map did not load."));
+    document.body.appendChild(script);
+  });
+}
+
+function skyDate(clock) {
+  if (!clock) return new Date();
+  const parsed = new Date(String(clock).replace(" ", "T"));
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function skyMode(name) {
+  const planet = { Moon: "moon", Mercury: "planet", Venus: "planet", Mars: "planet", Jupiter: "planet", Saturn: "planet", Uranus: "planet", Neptune: "planet" };
+  return planet[name] || "star";
+}
+
+function skyObjectName(obj) {
+  let names = [];
+  try { names = obj.designations() || []; } catch (error) { names = []; }
+  const named = names.find((item) => String(item).startsWith("NAME ")) || names[0] || "";
+  return String(named).replace(/^NAME\s+/, "").replace(/^M\s+/, "M") || "Sky position";
+}
+
+function readSkyPick(engine) {
+  const obj = engine.core && engine.core.selection;
+  const title = document.querySelector("#sky-pick-name");
+  const detail = document.querySelector("#sky-pick-detail");
+  const view = document.querySelector("#sky-view");
+  const plan = document.querySelector("#sky-plan");
+  if (!obj || !obj.getInfo) {
+    state.skyPick = null;
+    if (title) title.textContent = "Click an object";
+    if (detail) detail.textContent = "Nothing was selected. Click a star, planet, or deep-sky object.";
+    if (view) view.disabled = true;
+    if (plan) plan.disabled = true;
+    return;
+  }
+  const vector = obj.getInfo("radec");
+  if (!vector || vector.length < 3) return;
+  let ra = Math.atan2(vector[1], vector[0]);
+  if (ra < 0) ra += Math.PI * 2;
+  const dec = Math.atan2(vector[2], Math.hypot(vector[0], vector[1])) * 180 / Math.PI;
+  const name = skyObjectName(obj);
+  const pick = { name, ra: ra * 12 / Math.PI, dec, mode: skyMode(name) };
+  state.skyPick = pick;
+  if (title) title.textContent = name;
+  if (detail) detail.textContent = `${fmtRA(pick.ra)} · ${fmtDec(pick.dec)} · ${pick.mode === "star" ? "Deep sky" : pick.mode}`;
+  if (view) view.disabled = false;
+  if (plan) plan.disabled = false;
+}
+
+function syncSkyObserver() {
+  const engine = state.skyEngine;
+  if (!engine || !engine.observer) return;
+  const snap = state.snap || {};
+  const lat = Number(snap.latitude);
+  const lon = Number(snap.longitude);
+  if (Number.isFinite(lat)) engine.observer.latitude = lat * Math.PI / 180;
+  if (Number.isFinite(lon)) engine.observer.longitude = lon * Math.PI / 180;
+  if (engine.date2MJD) engine.observer.utc = engine.date2MJD(skyDate(snap.clock));
+}
+
+function prepareSky(engine) {
+  const base = "/static/sky/data/";
+  const sources = [
+    [engine.core.stars, base + "stars"],
+    [engine.core.dsos, base + "dso"],
+    [engine.core.milkyway, base + "surveys/milkyway"],
+  ];
+  sources.forEach(([module, url]) => {
+    try { module.addDataSource({ url }); } catch (error) { /* a missing survey leaves the rest of the map usable */ }
+  });
+  if (state.starChart === "gaia") {
+    try { engine.core.stars.addDataSource({ url: "/api/sky/gaia", key: "gaia" }); } catch (error) { /* the bright chart remains */ }
+  }
+  try {
+    engine.core.skycultures.addDataSource({ url: base + "skycultures/western", key: "western" });
+    engine.core.constellations.lines_visible = true;
+    engine.core.constellations.labels_visible = true;
+  } catch (error) { /* constellation art is optional */ }
+  engine.on("click", () => {
+    requestAnimationFrame(() => readSkyPick(engine));
+    return 0;
+  });
+  state.skyEngine = engine;
+}
+
+function chooseTonight(item) {
+  const generic = !item.name || String(item.name).startsWith("Messier");
+  const name = generic ? item.id : `${item.id} ${item.name}`;
+  state.skyPick = { name, ra: item.ra, dec: item.dec, mode: "star" };
+  const title = document.querySelector("#sky-pick-name");
+  const detail = document.querySelector("#sky-pick-detail");
+  const view = document.querySelector("#sky-view");
+  const plan = document.querySelector("#sky-plan");
+  if (title) title.textContent = name;
+  if (detail) detail.textContent = tonightDetail(item);
+  if (view) view.disabled = false;
+  if (plan) plan.disabled = false;
+  document.querySelectorAll("[data-tonight]").forEach((row) => {
+    row.classList.toggle("selected", Number(row.dataset.tonight) === item.index);
+  });
+  const engine = state.skyEngine;
+  if (!engine || !engine.lookAt) return;
+  const ra = item.ra * Math.PI / 12;
+  const dec = item.dec * Math.PI / 180;
+  const scale = Math.cos(dec);
+  engine.lookAt([Math.cos(ra) * scale, Math.sin(ra) * scale, Math.sin(dec)], 1);
+}
+
+function tonightDetail(item) {
+  const high = item.minutes_above_40 >= 60
+    ? `${(item.minutes_above_40 / 60).toFixed(1)} h above 40°`
+    : `${item.minutes_above_40} min above 40°`;
+  const when = new Date(item.peak_at);
+  const clock = Number.isNaN(when.getTime()) ? "" : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const moon = item.moon_up && item.moon_distance < 40 ? ` · Moon is ${item.moon_distance}° away` : "";
+  const magnitude = item.mag === null || item.mag === undefined ? "" : ` · mag ${item.mag}`;
+  return `${item.kind || "Deep sky"}${magnitude} · highest ${item.peak_altitude}° at ${clock} · ${high}${moon}`;
+}
+
+async function loadBestTonight() {
+  const snap = state.snap || {};
+  const lat = Number(snap.latitude);
+  const lon = Number(snap.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    toast("The telescope has not reported a place yet.");
+    return;
+  }
+  const data = await api(`/api/sky/tonight?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+  const card = document.querySelector("#tonight-card");
+  const note = document.querySelector("#tonight-note");
+  const list = document.querySelector("#best-list");
+  if (!card || !list) return;
+  card.hidden = false;
+  const picks = data.picks || [];
+  if (!picks.length) {
+    if (note) note.textContent = data.note || "Nothing in the catalog stays high enough tonight.";
+    list.innerHTML = "";
+    return;
+  }
+  const window = data.window || {};
+  const from = new Date(window.start);
+  const until = new Date(window.end);
+  const span = Number.isNaN(from.getTime()) ? "" : `${from.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–${until.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  if (note) note.textContent = `For this place during ${window.darkness || "the dark hours"}${span ? `, ${span}` : ""}. The first row is the best pick.`;
+  list.innerHTML = picks.map((item, index) => `
+    <button type="button" class="file tonight-row${index === 0 ? " selected" : ""}" data-tonight="${index}">
+      <span>${index === 0 ? "Best pick · " : ""}${escapeHtml(item.id)} ${escapeHtml(item.name || "")}</span>
+      <span class="muted">${escapeHtml(tonightDetail(item))}</span>
+    </button>`).join("");
+  list.querySelectorAll("[data-tonight]").forEach((row) => {
+    row.onclick = () => chooseTonight({ ...picks[Number(row.dataset.tonight)], index: Number(row.dataset.tonight) });
+  });
+  chooseTonight({ ...picks[0], index: 0 });
+}
+
+function chooseStarChart(chart) {
+  chart = chart === "gaia" ? "gaia" : "stellarium";
+  if (chart === state.starChart) return;
+  state.starChart = chart;
+  localStorage.setItem("seestar-starchart", chart);
+  document.querySelectorAll("[data-chart]").forEach((button) => {
+    button.classList.toggle("primary", button.dataset.chart === chart);
+  });
+  const note = document.querySelector(".chart-note");
+  if (note) {
+    note.textContent = chart === "gaia"
+      ? "Gaia adds faint stars and needs the internet. Bright stars stay from the Stellarium chart."
+      : "Stellarium is stored on this computer, down to magnitude 7.";
+  }
+  const canvas = document.querySelector("#skymap");
+  if (!canvas) return;
+  const fresh = document.createElement("canvas");
+  fresh.id = "skymap";
+  fresh.className = "skymap";
+  canvas.replaceWith(fresh);
+  const status = document.querySelector("#skymap-status");
+  if (status) {
+    status.hidden = false;
+    status.textContent = chart === "gaia" ? "Loading Gaia…" : "Loading the sky map…";
+  }
+  mountSky();
+}
+
+function mountSky() {
+  const canvas = document.querySelector("#skymap");
+  if (!canvas || canvas.dataset.booting) return;
+  canvas.dataset.booting = "1";
+  const status = document.querySelector("#skymap-status");
+  loadScript("/static/sky/stellarium-web-engine.js?v=2").then(() => {
+    const created = window.StelWebEngine({
+      canvas,
+      wasmFile: "/static/sky/stellarium-web-engine.wasm?v=2",
+      onReady(engine) {
+        prepareSky(engine);
+        syncSkyObserver();
+        if (status) status.hidden = true;
+      },
+    });
+    if (created && created.then) return created;
+    return null;
+  }).catch(() => {
+    canvas.dataset.booting = "";
+    if (status) status.textContent = "The sky map did not start.";
+  });
+}
+
 function bind() {
-  const find = document.querySelector("#find");
-  if (find) find.onclick = () => guard(async () => { state.scopes = (await api("/api/discover", { method: "POST" })).scopes; render(); });
+  document.querySelectorAll("#find, [data-find]").forEach((find) => {
+    find.onclick = () => guard(async () => { state.scopes = (await api("/api/discover", { method: "POST" })).scopes; render(); });
+  });
+  bindClick("#open-sky", () => show("sky"));
+  bindClick("#open-sky-wide", () => show("sky"));
+  bindClick("#open-picture", () => show("picture"));
+  bindClick("#open-plan", () => show("plan"));
   const manual = document.querySelector("#manual");
   if (manual) manual.onsubmit = (event) => {
     event.preventDefault();
@@ -603,8 +1313,52 @@ function bind() {
   bindClick("#park", () => {
     if (confirm("Park closes the arm and can power the telescope down.")) post("/park", {});
   });
+  mountSky();
+  document.querySelectorAll("[data-chart]").forEach((button) => {
+    button.onclick = () => chooseStarChart(button.dataset.chart);
+  });
+  bindClick("#best-tonight", () => guard(loadBestTonight));
+  bindClick("#sky-view", () => {
+    const pick = state.skyPick;
+    if (!pick) return;
+    if (!state.selected) {
+      toast("Connect a telescope first.");
+      return;
+    }
+    post("/goto", { name: pick.name, ra: pick.ra, dec: pick.dec, mode: pick.mode });
+  });
+  bindClick("#sky-plan", () => {
+    const pick = state.skyPick;
+    if (!pick) return;
+    state.planItems.push({
+      name: pick.name,
+      ra: pick.ra,
+      dec: pick.dec,
+      mode: pick.mode === "scenery" ? "star" : pick.mode,
+      minutes: 15,
+      rows: 1,
+      cols: 1,
+      overlap: 20,
+      gain: 80,
+      autofocus: true,
+    });
+    if (!state.selected) {
+      toast(`${pick.name} is on the list. Connect a telescope before running it.`);
+      return;
+    }
+    guard(async () => {
+      await runPlan(false);
+      toast(`${pick.name} added to tonight.`);
+    });
+  });
   const pad = document.querySelector("#pad");
   if (pad) bindPad(pad);
+  document.querySelectorAll("[data-speed]").forEach((button) => {
+    button.onclick = () => {
+      state.speed = Number(button.dataset.speed);
+      document.querySelectorAll("[data-speed]").forEach((item) => item.classList.toggle("primary", Number(item.dataset.speed) === state.speed));
+    };
+  });
   bindClick("#layout", () => {
     state.layout = state.layout === "theater" ? "cards" : "theater";
     localStorage.setItem("seestar-layout", state.layout);
@@ -616,6 +1370,36 @@ function bind() {
   bindClick("#live-stop", () => guard(async () => { await api(scopePath("/live"), { method: "POST", body: JSON.stringify({ enabled: false, camera: state.camera }) }); }));
   bindClick("#stack-start", () => post("/stack", { action: "start", restart: document.querySelector("#restart")?.checked ?? true, gain: document.querySelector("#gain")?.value }));
   bindClick("#stack-stop", () => post("/stack", { action: "stop" }));
+  const mosaic = document.querySelector("#mosaic");
+  if (mosaic) mosaic.onsubmit = (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(mosaic));
+    const snap = state.snap || {};
+    if (snap.ra === null || snap.ra === undefined || snap.dec === null || snap.dec === undefined) {
+      toast("The telescope has not reported coordinates yet.");
+      return;
+    }
+    state.planItems = [{
+      name: snap.target || "Mosaic",
+      ra: snap.ra,
+      dec: snap.dec,
+      mode: "star",
+      minutes: Number(data.minutes),
+      rows: Number(data.rows),
+      cols: Number(data.cols),
+      overlap: Number(data.overlap),
+      gain: document.querySelector("#gain")?.value,
+      autofocus: true,
+    }];
+    guard(() => runPlan(false));
+  };
+  const video = document.querySelector("#video");
+  if (video) video.onsubmit = (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(video));
+    post("/video", { mode: data.mode, minutes: Number(data.minutes) });
+  };
+  bindClick("#video-stop", () => post("/video", { action: "stop" }));
   bindClick("#autofocus", () => post("/focus", { action: "auto" }));
   bindClick("#focus-stop", () => post("/focus", { action: "stop" }));
   document.querySelectorAll("[data-focus]").forEach((button) => {
@@ -641,9 +1425,24 @@ function bind() {
       render();
     });
   });
+  bindClick("#select-all", () => {
+    document.querySelectorAll("input[name=file]").forEach((node) => { node.checked = true; });
+  });
   bindClick("#copy", () => guard(async () => {
     const names = [...document.querySelectorAll("input[name=file]:checked")].map((node) => node.value);
     const result = await api(scopePath("/download"), { method: "POST", body: JSON.stringify({ folder: state.folder, names }) });
+    const remove = document.querySelector("#delete-after")?.checked;
+    if (remove) {
+      if (!confirm(`Delete ${names.length} file${names.length === 1 ? "" : "s"} from the telescope? This cannot be undone.`)) {
+        toast(`Copied ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} to ${result.dest}`);
+        return;
+      }
+      const removed = await api(scopePath("/files/delete"), { method: "POST", body: JSON.stringify({ folder: state.folder, names }) });
+      toast(`Copied ${result.saved.length} and removed ${removed.removed.length} from the telescope.`);
+      state.files = (await api(`${scopePath("/files")}?folder=${encodeURIComponent(state.folder)}`)).files;
+      render();
+      return;
+    }
     toast(`Copied ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} to ${result.dest}`);
   }));
   const site = document.querySelector("#site");
@@ -653,6 +1452,25 @@ function bind() {
     post("/settings", data);
   };
   bindClick("#set-clock", () => post("/settings", { set_clock: true }));
+  bindClick("#wifi-scan", () => guard(async () => {
+    const data = await api(scopePath("/wifi"), { method: "POST", body: JSON.stringify({ action: "scan" }) });
+    state.networks = data.networks || [];
+    render();
+  }));
+  document.querySelectorAll("[data-ssid]").forEach((button) => {
+    button.onclick = () => {
+      const input = document.querySelector("#wifi-ssid");
+      if (input) input.value = button.dataset.ssid;
+    };
+  });
+  const wifi = document.querySelector("#wifi-join");
+  if (wifi) wifi.onsubmit = (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(wifi));
+    if (!confirm(`Join ${data.ssid}? The telescope will leave its current network.`)) return;
+    post("/wifi", { action: "join", ssid: data.ssid, password: data.password || "" });
+  };
+  bindPlan();
   const imaging = document.querySelector("#imaging");
   if (imaging) imaging.onsubmit = (event) => {
     event.preventDefault();
@@ -669,6 +1487,82 @@ function bind() {
     state.albumLoaded = true;
     guard(loadAlbum);
   }
+}
+
+function planPayload(action) {
+  return {
+    action,
+    items: state.planItems,
+    options: { park_when_finished: Boolean(document.querySelector("#park-end")?.checked) },
+    safety: {
+      min_battery: Number(document.querySelector("#min-battery")?.value ?? 20),
+      min_altitude: Number(document.querySelector("#min-altitude")?.value ?? 25),
+      max_cloud: Number(document.querySelector("#max-cloud")?.value ?? 80),
+      stop_before_dawn: document.querySelector("#stop-dawn")?.checked !== false,
+    },
+  };
+}
+
+async function runPlan(start) {
+  state.snap = await api(scopePath("/plan"), { method: "POST", body: JSON.stringify(planPayload(start ? "start" : "preview")) });
+  if (state.snap.plan && state.snap.plan.items) state.planItems = state.snap.plan.items;
+  if (state.page === "plan") render();
+  else paintMeters();
+}
+
+function bindPlan() {
+  const add = document.querySelector("#plan-add");
+  if (add) add.onsubmit = (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(add));
+    state.planItems.push({
+      name: data.name,
+      ra: Number(data.ra),
+      dec: Number(data.dec),
+      mode: data.mode,
+      minutes: Number(data.minutes),
+      rows: Number(data.rows),
+      cols: Number(data.cols),
+      overlap: Number(data.overlap),
+      gain: Number(data.gain),
+      autofocus: add.autofocus.checked,
+    });
+    render();
+  };
+  document.querySelectorAll("[data-drop]").forEach((button) => {
+    button.onclick = () => {
+      state.planItems.splice(Number(button.dataset.drop), 1);
+      render();
+    };
+  });
+  bindClick("#plan-start", () => runPlan(true));
+  bindClick("#plan-stop", () => guard(async () => {
+    state.snap = await api(scopePath("/plan"), { method: "POST", body: JSON.stringify({ action: "stop" }) });
+    paintMeters();
+  }));
+  bindClick("#weather", () => guard(async () => {
+    state.snap = await api(scopePath("/plan"), { method: "POST", body: JSON.stringify(planPayload("weather")) });
+    if (state.snap.plan && state.snap.plan.items) state.planItems = state.snap.plan.items;
+    render();
+  }));
+  const query = document.querySelector("#plan-query");
+  if (query) query.oninput = () => guard(async () => {
+    const data = await api(`/api/catalog?q=${encodeURIComponent(query.value)}`);
+    const box = document.querySelector("#plan-results");
+    if (!box) return;
+    const targets = data.targets.slice(0, 6);
+    box.innerHTML = targets.map((target, index) =>
+      `<button type="button" data-plan-target="${index}">${escapeHtml(target.id)} ${escapeHtml(target.name)}</button>`
+    ).join("");
+    box.querySelectorAll("[data-plan-target]").forEach((button) => {
+      button.onclick = () => {
+        const target = targets[Number(button.dataset.planTarget)];
+        document.querySelector("#plan-name").value = target.id;
+        document.querySelector("#plan-ra").value = target.ra;
+        document.querySelector("#plan-dec").value = target.dec;
+      };
+    });
+  });
 }
 
 function bindClick(selector, action) {
@@ -712,7 +1606,7 @@ function bindPad(pad) {
     if (Math.hypot(dx, dy) < 24) return;
     let angle = Math.atan2(-dy, dx) * 180 / Math.PI;
     if (angle < 0) angle += 360;
-    api(scopePath("/move"), { method: "POST", body: JSON.stringify({ angle, speed: 1500, dur: 1 }) }).catch((error) => toast(error.message));
+    api(scopePath("/move"), { method: "POST", body: JSON.stringify({ angle, speed: state.speed, dur: 1 }) }).catch((error) => toast(error.message));
   };
   pad.onpointerdown = (event) => {
     send(event);
@@ -766,7 +1660,7 @@ function drawRose() {
   ctx.arc(cx, cy, 90, 0, Math.PI * 2);
   ctx.stroke();
   ctx.fillStyle = "#93a0b4";
-  ctx.font = "14px Palatino, Georgia, serif";
+  ctx.font = "14px Inter, Segoe UI, sans-serif";
   ctx.fillText("N", cx - 5, cy - 98);
   ctx.fillText("E", cx + 98, cy + 4);
   ctx.fillText("S", cx - 4, cy + 112);

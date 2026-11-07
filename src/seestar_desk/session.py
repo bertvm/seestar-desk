@@ -12,7 +12,8 @@ from seestar_desk.auth import MISSING_KEY, find_key, sign_challenge
 from seestar_desk.discovery import FoundScope
 from seestar_desk.errors import ScopeError
 from seestar_desk.framing import LineBuffer, dumps
-from seestar_desk.imaging import FrameParser, to_jpeg
+from seestar_desk.imaging import ACK, JPEG, RAW, FrameParser, to_jpeg
+from seestar_desk.plan import NightPlan
 
 UpdateHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -37,6 +38,7 @@ GUEST_OK = {
     "pi_get_time",
     "pi_is_verified",
     "pi_station_state",
+    "pi_station_scan",
     "scope_get_equ_coord",
     "scope_get_ra_dec",
     "scope_get_horiz_coord",
@@ -93,13 +95,21 @@ class ScopeSession:
             "temperature": None,
             "settings": {},
             "last_error": "",
+            "live_error": "",
             "mode": "",
             "target": "",
+            "latitude": None,
+            "longitude": None,
         }
         self.log: list[dict[str, Any]] = []
         self.frames: dict[str, bytes] = {}
-        self.frame_seq: dict[str, int] = {"tele": 0, "wide": 0}
+        self.frame_seq: dict[str, int] = {"tele": 0, "wide": 0, "stack": 0}
         self._streams: dict[str, ImageClient] = {}
+        self._video_task: asyncio.Task | None = None
+        self._last_stacked_pull: Any = None
+        self._frame_at: dict[str, float] = {}
+        self._preview_at = 0.0
+        self.night = NightPlan(self)
 
     @property
     def id(self) -> str:
@@ -110,6 +120,13 @@ class ScopeSession:
         snap["connected"] = self.connected
         snap["master"] = self.master
         snap["frame_seq"] = dict(self.frame_seq)
+        stack = dict(snap.get("stack") or {})
+        phase = str(stack.get("state") or "")
+        started = stack.get("started_at")
+        if started and phase in {"start", "working", "stacking"} and stack.get("elapsed") in (None, ""):
+            stack["elapsed"] = max(0, int(time.time() - float(started)))
+        snap["stack"] = stack
+        snap["plan"] = self.night.public()
         return snap
 
     async def connect(self) -> dict[str, Any]:
@@ -143,6 +160,11 @@ class ScopeSession:
         return self.snapshot()
 
     async def disconnect(self) -> None:
+        self.night.stop()
+        if self.night._task and not self.night._task.done():
+            self.night._task.cancel()
+        if self._video_task and not self._video_task.done():
+            self._video_task.cancel()
         for stream in list(self._streams.values()):
             await stream.stop()
         self._streams.clear()
@@ -233,10 +255,14 @@ class ScopeSession:
             "get_view_state",
             "get_focuser_position",
             "pi_station_state",
+            "get_user_location",
+            "pi_get_time",
         ):
             try:
                 await self.command(method, timeout=4)
             except ScopeError as exc:
+                if method in {"get_user_location", "pi_get_time"}:
+                    continue
                 self.state["last_error"] = str(exc)
                 break
 
@@ -261,11 +287,25 @@ class ScopeSession:
 
     async def stack(self, restart: bool, gain: int | None) -> dict[str, Any]:
         response = await self.command("iscope_start_stack", {"restart": restart})
+        stack = dict(self.state.get("stack") or {})
+        if not stack.get("state"):
+            stack["state"] = "working"
+        if not stack.get("started_at"):
+            stack["started_at"] = time.time()
+        self.state["stack"] = stack
+        self._last_stacked_pull = None
         if gain is not None:
             try:
                 await self.command("set_control_value", ["gain", int(gain)])
             except ScopeError as exc:
                 self.state["last_error"] = str(exc)
+        try:
+            await self.live("tele", True)
+            client = self._streams.get("tele")
+            if client:
+                await client.request("get_stacked_img")
+        except (ScopeError, OSError, asyncio.TimeoutError) as exc:
+            self.state["live_error"] = str(exc)
         return response
 
     async def focus_move(self, position: int) -> dict[str, Any]:
@@ -283,6 +323,8 @@ class ScopeSession:
     async def apply_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         last: dict[str, Any] = {}
         if "lat" in payload and "lon" in payload:
+            self.state["latitude"] = float(payload["lat"])
+            self.state["longitude"] = float(payload["lon"])
             last = await self.command(
                 "set_user_location",
                 {"lat": float(payload["lat"]), "lon": float(payload["lon"]), "force": True},
@@ -347,11 +389,102 @@ class ScopeSession:
                 self._streams.pop(camera, None)
             return
         if current and current.running:
+            if time.time() - self._frame_at.get(camera, 0) < 2:
+                return
+            await self._ensure_preview(force=True)
+            await current.request("begin_streaming")
             return
+        await self._ensure_preview(force=True)
         port = self.wide_port if camera == "wide" else self.image_port
-        client = ImageClient(self.host, port, camera, self._on_frame)
+        client = ImageClient(
+            self.host, port, camera, self._on_frame, self._on_live_status, self._preview_for_stream
+        )
         self._streams[camera] = client
-        await client.start()
+        try:
+            await client.start()
+        except Exception:
+            self._streams.pop(camera, None)
+            raise
+        self.state["live_error"] = ""
+
+    async def _preview_for_stream(self) -> None:
+        await self._ensure_preview(force=True)
+
+    async def _ensure_preview(self, force: bool = False) -> None:
+        """Open the camera where it is pointing so the image port will send frames."""
+        try:
+            await self.command("get_view_state", timeout=4)
+        except ScopeError:
+            pass
+        stage = str((self.state.get("view") or {}).get("stage") or "")
+        view_state = str((self.state.get("view") or {}).get("state") or "")
+        if stage == "Stack" or stage == "RTSP" or (stage == "AutoGoto" and view_state == "working"):
+            return
+        if stage == "ContinuousExposure" and (not force or time.time() - self._preview_at < 4):
+            return
+        self._preview_at = time.time()
+        await self.command(
+            "iscope_start_view",
+            {"mode": self.state.get("mode") or "star", "target_name": self.state.get("target") or "Preview"},
+        )
+
+    async def start_video(self, mode: str, minutes: float | None) -> dict[str, Any]:
+        mode = mode if mode in {"planet", "moon", "scenery"} else "planet"
+        response = await self.command(
+            "iscope_start_view",
+            {"mode": mode, "target_name": mode.title()},
+        )
+        if mode == "planet":
+            try:
+                await self.command("start_scan_planet")
+            except ScopeError as exc:
+                if not _unsupported(exc):
+                    raise
+        self.state["mode"] = mode
+        self.state["target"] = mode.title()
+        try:
+            await self.live("tele", True)
+        except (ScopeError, OSError, asyncio.TimeoutError) as exc:
+            self.state["live_error"] = str(exc)
+        if self._video_task and not self._video_task.done():
+            self._video_task.cancel()
+        self._video_task = None
+        if minutes is not None:
+            self._video_task = asyncio.create_task(self._end_video(max(0.0, float(minutes))))
+        return response
+
+    async def _end_video(self, minutes: float) -> None:
+        try:
+            await asyncio.sleep(minutes * 60.0)
+            await self.stop()
+            await self._note(f"Recording stopped after {minutes:g} min.")
+        except asyncio.CancelledError:
+            raise
+
+    async def wifi_scan(self) -> list[dict[str, Any]]:
+        response = await self.command("pi_station_scan", timeout=12)
+        return _networks(response.get("result"))
+
+    async def wifi_join(self, ssid: str, password: str) -> dict[str, Any]:
+        if not ssid.strip():
+            raise ScopeError("Enter the network name.")
+        await self.command("pi_station_set", {"ssid": ssid, "passwd": password}, timeout=15)
+        try:
+            await self.command("pi_station_open", timeout=8)
+        except ScopeError as exc:
+            if not _unsupported(exc):
+                raise
+        try:
+            await self.command("pi_station_state", timeout=8)
+        except ScopeError:
+            pass
+        await self._note(f"Asked the telescope to join {ssid}.")
+        return self.snapshot()
+
+    async def delete_images(self, folder: str, names: list[str]) -> list[str]:
+        from seestar_desk.album import delete_files
+
+        return await delete_files(self, folder, names)
 
     def file_url(self, path: str) -> str:
         quoted = urllib.parse.quote(path, safe="/")
@@ -360,6 +493,7 @@ class ScopeSession:
     async def _set_clock(self) -> dict[str, Any]:
         now = time.localtime()
         zone = time.tzname[1] if time.daylight and now.tm_isdst else time.tzname[0]
+        self.state["clock"] = time.strftime("%Y-%m-%d %H:%M:%S", now)
         return await self.command(
             "pi_set_time",
             {
@@ -480,6 +614,10 @@ class ScopeSession:
                     await self.command(method, timeout=4)
                 except ScopeError:
                     continue
+                try:
+                    await self.night.guard_exposure()
+                except ScopeError:
+                    continue
         except asyncio.CancelledError:
             raise
 
@@ -497,15 +635,24 @@ class ScopeSession:
         elif method == "get_wheel_position":
             self.state["filter"] = _number(result if not isinstance(result, dict) else result.get("position", result))
         elif method == "pi_station_state" and isinstance(result, dict):
-            self.state["wifi"] = result.get("ssid") or self.state.get("wifi")
-            self.state["station"] = result
+            _absorb_station(self.state, result)
+        elif method in {"get_user_location", "set_user_location"}:
+            _absorb_location(self.state, result)
+        elif method == "pi_get_time":
+            text = _clock_text(result)
+            if text:
+                self.state["clock"] = text
         elif method == "get_setting" and isinstance(result, dict):
             self.state["settings"] = result
         elif method == "get_view_state":
             if isinstance(result, dict):
-                self.state["view"] = result
-                self.state["mode"] = result.get("mode") or self.state["mode"]
-                self.state["target"] = result.get("target_name") or self.state["target"]
+                nested = result.get("View") if isinstance(result.get("View"), dict) else {}
+                flat = {**result, **nested}
+                view = dict(self.state.get("view") or {})
+                view.update(flat)
+                self.state["view"] = view
+                self.state["mode"] = flat.get("mode") or self.state["mode"]
+                self.state["target"] = flat.get("target_name") or self.state["target"]
         elif method == "set_setting" and isinstance(result, dict):
             settings = dict(self.state.get("settings") or {})
             settings.update(result)
@@ -518,20 +665,19 @@ class ScopeSession:
         if name == "PiStatus":
             _absorb_device(self.state, message)
         elif name in {"AutoGoto", "View", "ContinuousExposure"}:
-            view = dict(self.state.get("view") or {})
-            view.update({key: value for key, value in message.items() if key != "Timestamp"})
-            self.state["view"] = view
-            if message.get("target_name"):
-                self.state["target"] = message["target_name"]
-            if message.get("mode"):
-                self.state["mode"] = message["mode"]
+            _absorb_view(self.state, message)
         elif name in {"Stack", "Exposure"}:
-            stack = dict(self.state.get("stack") or {})
-            stack.update(message)
-            self.state["stack"] = stack
+            _absorb_stack(self.state, message)
+            self._pull_stack_frame()
         elif name in {"3PPA", "EqModePA"}:
             align = dict(self.state.get("align") or {})
-            align.update(message)
+            for key in ("x", "y", "state", "state_code", "error", "Event", "eq_offset_alt", "eq_offset_az"):
+                if key in message:
+                    align[key] = message[key]
+            if "x" not in align and "eq_offset_az" in align:
+                align["x"] = align["eq_offset_az"]
+            if "y" not in align and "eq_offset_alt" in align:
+                align["y"] = align["eq_offset_alt"]
             self.state["align"] = align
         elif name in {"FocuserMove", "AutoFocus"}:
             if "position" in message:
@@ -541,7 +687,21 @@ class ScopeSession:
         self.log.append(entry)
         del self.log[:-200]
 
+    def _pull_stack_frame(self) -> None:
+        client = self._streams.get("tele")
+        stacked = (self.state.get("stack") or {}).get("stacked")
+        if client is None or not client.running or stacked in (None, self._last_stacked_pull):
+            return
+        self._last_stacked_pull = stacked
+        asyncio.create_task(client.request("get_stacked_img"))
+
+    async def _on_live_status(self, text: str) -> None:
+        self.state["live_error"] = text
+        await self._emit("state", self.snapshot())
+
     async def _on_frame(self, camera: str, jpeg: bytes, frame_meta: dict[str, Any]) -> None:
+        self._frame_at[camera] = time.time()
+        self.state["live_error"] = ""
         self.frames[camera] = jpeg
         self.frame_seq[camera] = self.frame_seq.get(camera, 0) + 1
         await self._emit(
@@ -564,18 +724,28 @@ class ScopeSession:
 
 
 class ImageClient:
-    def __init__(self, host: str, port: int, camera: str, on_jpeg) -> None:
+    def __init__(self, host: str, port: int, camera: str, on_jpeg, on_status=None, on_need_preview=None) -> None:
         self.host = host
         self.port = port
         self.camera = camera
         self.on_jpeg = on_jpeg
+        self.on_status = on_status
+        self.on_need_preview = on_need_preview
         self.running = False
         self._writer: asyncio.StreamWriter | None = None
         self._task: asyncio.Task | None = None
         self._next_id = 1
+        self._out: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        self._retry_stream = False
+
+    async def request(self, method: str, params: Any = None) -> None:
+        await self._out.put((method, params))
 
     async def start(self) -> None:
         reader, self._writer = await asyncio.wait_for(asyncio.open_connection(self.host, self.port), timeout=5)
+        sock = self._writer.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.running = True
         self._task = asyncio.create_task(self._run(reader), name=f"image-{self.camera}")
 
@@ -591,40 +761,242 @@ class ImageClient:
             self._task.cancel()
             self._task = None
 
-    async def _send(self, method: str) -> None:
+    async def _send(self, method: str, params: Any = None) -> None:
         if self._writer is None:
             return
-        message = {"id": self._next_id, "method": method}
+        message: dict[str, Any] = {"id": self._next_id, "method": method}
         self._next_id += 1
+        if params is not None:
+            message["params"] = params
         self._writer.write(dumps(message))
         await self._writer.drain()
 
     async def _run(self, reader: asyncio.StreamReader) -> None:
         parser = FrameParser()
         last_beat = time.monotonic()
+        last_pull = 0.0
         try:
+            await self._handshake(parser, reader)
             await self._send("begin_streaming")
             while self.running:
-                if time.monotonic() - last_beat > 4:
+                while not self._out.empty():
+                    method, params = self._out.get_nowait()
+                    await self._send(method, params)
+                now = time.monotonic()
+                if now - last_beat > 4:
                     await self._send("test_connection")
-                    last_beat = time.monotonic()
-                data = await asyncio.wait_for(reader.read(262144), timeout=8)
+                    last_beat = now
+                if now - last_pull > 3:
+                    await self._send("get_current_img")
+                    last_pull = now
+                if self._retry_stream:
+                    self._retry_stream = False
+                    await self._send("begin_streaming")
+                try:
+                    data = await asyncio.wait_for(reader.read(262144), timeout=1)
+                except asyncio.TimeoutError:
+                    continue
                 if not data:
                     break
-                for kind, item in parser.feed(data):
-                    if kind != "frame":
-                        continue
-                    jpeg = await asyncio.get_running_loop().run_in_executor(None, to_jpeg, item)
-                    if jpeg:
-                        await self.on_jpeg(
-                            self.camera,
-                            jpeg,
-                            {"img_type": item.img_type, "width": item.width, "height": item.height},
-                        )
+                await self._consume(parser.feed(data))
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             self.running = False
+            if self.on_status:
+                await self.on_status(str(exc))
+
+    async def _handshake(self, parser: FrameParser, reader: asyncio.StreamReader) -> None:
+        """Sign the image port when it asks. Current firmware answers with a binary note instead."""
+        await self._send("get_verify_str", "verify")
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline and self.running:
+            try:
+                data = await asyncio.wait_for(reader.read(262144), timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                return
+            if not data:
+                return
+            message: dict[str, Any] | None = None
+            frames = []
+            for kind, item in parser.feed(data):
+                if kind == "json" and message is None:
+                    message = item
+                elif kind == "frame":
+                    frames.append(item)
+            await self._consume([("frame", item) for item in frames])
+            if message is None:
+                if any(item.img_type == ACK for item in frames):
+                    return
+                continue
+            error = response_error(message) or ""
+            if error.startswith("103") or "unknown" in error.lower() or "not found" in error.lower():
+                return
+            result = message.get("result") if isinstance(message.get("result"), dict) else {}
+            challenge = result.get("str") or result.get("verify_str")
+            if not challenge:
+                return
+            key = find_key()
+            if key is None:
+                raise ScopeError(MISSING_KEY)
+            await self._send("verify_client", {"sign": sign_challenge(key, str(challenge)), "data": str(challenge)})
+            await self._next_json(parser, reader, 4)
+            return
+
+    async def _next_json(self, parser: FrameParser, reader: asyncio.StreamReader, timeout: float) -> dict[str, Any] | None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and self.running:
+            try:
+                data = await asyncio.wait_for(reader.read(262144), timeout=max(0.1, deadline - time.monotonic()))
+            except asyncio.TimeoutError:
+                return None
+            if not data:
+                return None
+            found: dict[str, Any] | None = None
+            frames = []
+            for kind, item in parser.feed(data):
+                if kind == "json" and found is None:
+                    found = item
+                elif kind == "frame":
+                    frames.append(item)
+            await self._consume([("frame", item) for item in frames])
+            if found is not None:
+                return found
+        return None
+
+    async def _consume(self, items: list[tuple[str, Any]]) -> None:
+        loop = asyncio.get_running_loop()
+        for kind, item in items:
+            if kind == "json":
+                error = response_error(item)
+                if error and item.get("method") not in {None, "test_connection"} and self.on_status:
+                    await self.on_status(error)
+                continue
+            jpeg = await loop.run_in_executor(None, to_jpeg, item)
+            if item.img_type == ACK:
+                note = item.payload.decode("latin1", "replace").strip()
+                lowered = note.lower()
+                if "continuous exposure" in lowered:
+                    if self.on_need_preview:
+                        await self.on_need_preview()
+                    self._retry_stream = True
+                elif note and lowered not in {"done", "ok", "server connected!"} and "unknown method" not in lowered:
+                    if self.on_status:
+                        await self.on_status(note)
+                continue
+            if not jpeg:
+                continue
+            role = "stack" if item.img_type in {JPEG, RAW} else self.camera
+            await self.on_jpeg(
+                role,
+                jpeg,
+                {"img_type": item.img_type, "width": item.width, "height": item.height},
+            )
+
+
+def _coord(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _absorb_location(state: dict[str, Any], result: Any) -> None:
+    lat = lon = None
+    if isinstance(result, dict):
+        pair = result.get("location_lon_lat")
+        if isinstance(pair, list):
+            _absorb_location(state, pair)
+        for key in ("location", "user_location"):
+            nested = result.get(key)
+            if isinstance(nested, (dict, list)):
+                _absorb_location(state, nested)
+        lat = result.get("lat", result.get("latitude"))
+        lon = result.get("lon", result.get("longitude", result.get("lng", result.get("longtitude"))))
+    elif isinstance(result, list) and len(result) >= 2:
+        # The telescope sends [longitude, latitude].
+        lon, lat = result[0], result[1]
+    parsed_lat = _coord(lat)
+    parsed_lon = _coord(lon)
+    if parsed_lat is not None:
+        state["latitude"] = parsed_lat
+    if parsed_lon is not None:
+        state["longitude"] = parsed_lon
+
+
+def _clock_text(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    try:
+        return (
+            f"{int(result['year']):04d}-{int(result['mon']):02d}-{int(result['day']):02d} "
+            f"{int(result['hour']):02d}:{int(result['min']):02d}:{int(result.get('sec') or 0):02d}"
+        )
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def _absorb_view(state: dict[str, Any], message: dict[str, Any]) -> None:
+    view = dict(state.get("view") or {})
+    for key in ("state", "stage", "target_name", "mode", "percent", "error", "state_code", "Event"):
+        if key in message:
+            view[key] = message[key]
+    state["view"] = view
+    if message.get("target_name"):
+        state["target"] = message["target_name"]
+    if message.get("mode"):
+        state["mode"] = message["mode"]
+
+
+def _absorb_stack(state: dict[str, Any], message: dict[str, Any]) -> None:
+    stack = dict(state.get("stack") or {})
+    nested = message.get("stack_status") if isinstance(message.get("stack_status"), dict) else {}
+    data = {key: value for key, value in message.items() if key != "Timestamp"}
+    data.update(nested)
+    extracted: dict[str, Any] = {}
+    for src, dest in (
+        ("stacked_frame", "stacked"),
+        ("stacked_frames", "stacked"),
+        ("stack_count", "stacked"),
+        ("dropped_frame", "dropped"),
+        ("dropped_frames", "dropped"),
+        ("dropped_count", "dropped"),
+        ("total_frame", "total"),
+        ("total_frames", "total"),
+    ):
+        if src in data and data[src] is not None and dest not in extracted:
+            extracted[dest] = data[src]
+    stack.update(extracted)
+    if data.get("elapsed") is not None:
+        stack["elapsed"] = data["elapsed"]
+    if data.get("state"):
+        phase = str(data["state"])
+        stack["state"] = phase
+        if phase in {"start", "working", "stacking"} and not stack.get("started_at"):
+            stack["started_at"] = time.time()
+    state["stack"] = stack
+
+
+def _networks(result: Any) -> list[dict[str, Any]]:
+    rows = result if isinstance(result, list) else []
+    if isinstance(result, dict):
+        for key in ("list", "ssids", "stations", "aps"):
+            if isinstance(result.get(key), list):
+                rows = result[key]
+                break
+    networks: list[dict[str, Any]] = []
+    for item in rows:
+        if isinstance(item, str):
+            networks.append({"ssid": item, "rssi": None})
+        elif isinstance(item, dict) and (item.get("ssid") or item.get("name")):
+            networks.append({"ssid": item.get("ssid") or item.get("name"), "rssi": item.get("rssi") or item.get("sig_lev")})
+    return networks
 
 
 def response_error(message: dict[str, Any]) -> str | None:
@@ -703,16 +1075,87 @@ def _absorb_horizontal(state: dict[str, Any], result: Any) -> None:
         state["alt"], state["az"] = result[0], result[1]
 
 
+def _firmware_label(device: dict[str, Any]) -> str:
+    for key in ("firmware_ver_string", "firmware_version", "fw_ver"):
+        if device.get(key):
+            return str(device[key])
+    value = device.get("firmware_ver_int")
+    text = str(value or "")
+    if len(text) == 4 and text.startswith("2"):
+        return f"{int(text[1:-2])}.{text[-2:]}"
+    return text
+
+
+def _absorb_power(state: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in ("battery_capacity", "battery_percent", "battery"):
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            state["battery"] = value
+            break
+    if "charge_online" in source:
+        state["charging"] = bool(source["charge_online"])
+    status = str(source.get("charger_status") or "").lower()
+    if status:
+        state["charging"] = status not in {"discharging", "not charging", "idle", "none", "full"}
+
+
+def _absorb_temperature(state: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in ("temp", "temperature", "pi_temp", "cpu_temp", "core_temp"):
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            state["temperature"] = value
+            return
+
+
+def _absorb_station(state: dict[str, Any], result: dict[str, Any]) -> None:
+    state["wifi"] = result.get("ssid") or state.get("wifi")
+    state["station"] = result
+    for key in ("ip", "station_ip", "addr", "ip_address"):
+        if result.get(key):
+            state["ip"] = str(result[key])
+            break
+    for key in ("rssi", "sig_lev", "signal", "quality"):
+        value = result.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            state["wifi_signal"] = value
+            return
+
+
 def _absorb_disk(state: dict[str, Any], result: Any) -> None:
     if isinstance(result, dict):
-        for key, target in (("free", "disk_free"), ("free_mb", "disk_free"), ("avail", "disk_free")):
-            if key in result:
-                state[target] = result[key]
-        for key, target in (("total", "disk_total"), ("total_mb", "disk_total"), ("capacity", "disk_total")):
-            if key in result:
-                state[target] = result[key]
-    elif isinstance(result, list) and len(result) >= 2:
+        volume = _storage_volume(result)
+        source = volume or result
+        for key in ("free", "free_mb", "freeMB", "avail"):
+            if isinstance(source.get(key), (int, float)) and not isinstance(source.get(key), bool):
+                state["disk_free"] = source[key]
+                break
+        for key in ("total", "total_mb", "totalMB", "disk_mb", "diskSizeMB", "capacity"):
+            if isinstance(source.get(key), (int, float)) and not isinstance(source.get(key), bool):
+                state["disk_total"] = source[key]
+                break
+    elif isinstance(result, list) and len(result) >= 2 and all(isinstance(item, (int, float)) for item in result[:2]):
         state["disk_total"], state["disk_free"] = result[0], result[1]
+    elif isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict):
+                _absorb_disk(state, item)
+                return
+
+
+def _storage_volume(result: dict[str, Any]) -> dict[str, Any] | None:
+    volumes = result.get("storage_volume") or result.get("connected_storage")
+    if not isinstance(volumes, list):
+        return None
+    current = str(result.get("cur_storage") or "")
+    chosen: dict[str, Any] | None = None
+    for item in volumes:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("path") or item.get("id") or item.get("type") or "")
+        if current and current == name:
+            return item
+        chosen = chosen or item
+    return chosen
 
 
 def _absorb_device(state: dict[str, Any], result: Any) -> None:
@@ -722,23 +1165,23 @@ def _absorb_device(state: dict[str, Any], result: Any) -> None:
     if isinstance(device, dict):
         if device.get("firmware_ver_int"):
             state["firmware"] = device["firmware_ver_int"]
+        label = _firmware_label(device)
+        if label:
+            state["firmware_label"] = label
         for key in ("name", "device_name"):
             if device.get(key):
                 state["name"] = device[key]
         for key in ("model", "product_model"):
             if device.get(key):
                 state["model"] = device[key]
-        if "battery_capacity" in device:
-            state["battery"] = device["battery_capacity"]
-        if "battery" in device and not isinstance(device["battery"], dict):
-            state["battery"] = device["battery"]
-    for key in ("battery_capacity", "battery"):
-        if key in result and not isinstance(result[key], dict):
-            state["battery"] = result[key]
-    if "charge_online" in result:
-        state["charging"] = bool(result["charge_online"])
-    if "temp" in result:
-        state["temperature"] = result["temp"]
+        _absorb_power(state, device)
+        _absorb_temperature(state, device)
+    _absorb_power(state, result)
+    _absorb_temperature(state, result)
+    pi_status = result.get("pi_status") if isinstance(result.get("pi_status"), dict) else None
+    if pi_status:
+        _absorb_power(state, pi_status)
+        _absorb_temperature(state, pi_status)
     mount = result.get("mount") if isinstance(result.get("mount"), dict) else {}
     if "equ_mode" in mount:
         state["equatorial"] = bool(mount["equ_mode"])
@@ -746,6 +1189,8 @@ def _absorb_device(state: dict[str, Any], result: Any) -> None:
         state["parked"] = bool(mount["close"])
     if "track" in mount:
         state["tracking"] = bool(mount["track"])
+    if "location_lon_lat" in result:
+        _absorb_location(state, result["location_lon_lat"])
     storage = result.get("storage") if isinstance(result.get("storage"), dict) else None
     if storage:
         _absorb_disk(state, storage)

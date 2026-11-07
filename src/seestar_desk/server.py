@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
+import re
 import urllib.error
 import urllib.request
+
+mimetypes.add_type("application/wasm", ".wasm")
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +17,7 @@ from aiohttp import web
 
 from seestar_desk.album import download_files, list_albums, list_folder
 from seestar_desk.catalog import search
+from seestar_desk.sky import best_tonight
 from seestar_desk.discovery import FoundScope, discover
 from seestar_desk.errors import ScopeError
 from seestar_desk.session import ScopeSession
@@ -133,6 +138,8 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_static("/static", WEB_ROOT)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/catalog", catalog)
+    app.router.add_get("/api/sky/tonight", tonight)
+    app.router.add_get("/api/sky/gaia/{tail:.*}", gaia_survey)
     app.router.add_get("/api/scopes", scopes)
     app.router.add_post("/api/discover", do_discover)
     app.router.add_post("/api/scopes", add_scope)
@@ -154,6 +161,10 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_post("/api/scopes/{scope_id}/stack", stack)
     app.router.add_post("/api/scopes/{scope_id}/align", align)
     app.router.add_post("/api/scopes/{scope_id}/live", live)
+    app.router.add_post("/api/scopes/{scope_id}/video", video)
+    app.router.add_post("/api/scopes/{scope_id}/plan", plan)
+    app.router.add_post("/api/scopes/{scope_id}/wifi", wifi)
+    app.router.add_post("/api/scopes/{scope_id}/files/delete", remove_files)
     app.router.add_post("/api/scopes/{scope_id}/settings", settings)
     app.router.add_get("/api/scopes/{scope_id}/albums", albums)
     app.router.add_get("/api/scopes/{scope_id}/files", files)
@@ -170,6 +181,48 @@ async def health(_request: web.Request) -> web.Response:
 
 async def catalog(request: web.Request) -> web.Response:
     return web.json_response({"targets": search(request.query.get("q", ""), limit=80)})
+
+
+async def tonight(request: web.Request) -> web.Response:
+    try:
+        latitude = float(request.query.get("lat", ""))
+        longitude = float(request.query.get("lon", ""))
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text="A latitude and longitude are required.") from exc
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        raise web.HTTPBadRequest(text="That place is outside the map.")
+    return web.json_response(best_tonight(latitude, longitude))
+
+
+_GAIA_TILE = re.compile(r"^(?:properties|Norder\d+/Dir\d+/Npix\d+\.eph|Norder\d+/Allsky\.eph)$")
+_GAIA_ROOT = "https://data.stellarium.org/surveys/gaia"
+
+
+def _gaia_body(path: str) -> tuple[int, bytes, str]:
+    request = urllib.request.Request(f"{_GAIA_ROOT}/{path}", headers={"User-Agent": "SeestarDesk"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read()
+            kind = response.headers.get_content_type()
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code, b"", "application/octet-stream"
+    if path == "properties" and status == 200 and not re.search(r"(?m)^type\s*=", body.decode("utf-8", "replace")):
+        body = body.rstrip() + b"\ntype                 = stars\n"
+        kind = "text/plain"
+    return status, body, kind
+
+
+async def gaia_survey(request: web.Request) -> web.Response:
+    path = request.match_info["tail"].strip("/")
+    if not _GAIA_TILE.match(path):
+        raise web.HTTPNotFound()
+    status, body, kind = await asyncio.to_thread(_gaia_body, path)
+    if status == 404:
+        raise web.HTTPNotFound()
+    if status != 200:
+        raise web.HTTPBadGateway(text="The Gaia chart did not answer.")
+    return web.Response(body=body, content_type=kind or "application/octet-stream")
 
 
 async def scopes(request: web.Request) -> web.Response:
@@ -339,7 +392,53 @@ async def live(request: web.Request) -> web.Response:
     session = await _session(request)
     body = await _body(request)
     await session.live(str(body.get("camera") or "tele"), bool(body.get("enabled", True)))
-    return web.json_response({"ok": True, "seq": session.frame_seq})
+    return web.json_response({"ok": True, "seq": session.frame_seq, "live_error": session.state.get("live_error") or ""})
+
+
+async def video(request: web.Request) -> web.Response:
+    session = await _session(request)
+    body = await _body(request)
+    if body.get("action") == "stop":
+        if session._video_task and not session._video_task.done():
+            session._video_task.cancel()
+        await session.stop()
+        return web.json_response(session.snapshot())
+    minutes = body.get("minutes")
+    await session.start_video(str(body.get("mode") or "planet"), None if minutes in (None, "") else float(minutes))
+    return web.json_response(session.snapshot())
+
+
+async def plan(request: web.Request) -> web.Response:
+    session = await _session(request)
+    body = await _body(request)
+    action = body.get("action") or "preview"
+    session.night.replace(body)
+    if action == "weather":
+        await session.night.refresh_weather()
+        return web.json_response(session.snapshot())
+    if action == "start":
+        session.night.start()
+    elif action == "stop":
+        session.night.stop()
+        await session.stop()
+    return web.json_response(session.snapshot())
+
+
+async def wifi(request: web.Request) -> web.Response:
+    session = await _session(request)
+    body = await _body(request)
+    if body.get("action") == "join":
+        await session.wifi_join(str(body.get("ssid") or ""), str(body.get("password") or ""))
+        return web.json_response(session.snapshot())
+    return web.json_response({"networks": await session.wifi_scan(), "station": session.state.get("station") or {}})
+
+
+async def remove_files(request: web.Request) -> web.Response:
+    session = await _session(request)
+    body = await _body(request)
+    names = [str(name) for name in body.get("names") or [] if name]
+    removed = await session.delete_images(str(body.get("folder") or ""), names)
+    return web.json_response({"removed": removed})
 
 
 async def settings(request: web.Request) -> web.Response:
@@ -389,7 +488,9 @@ async def media(request: web.Request) -> web.Response:
 
 async def frame(request: web.Request) -> web.Response:
     session = await _session(request)
-    camera = "wide" if request.query.get("camera") == "wide" else "tele"
+    camera = request.query.get("camera") or "tele"
+    if camera not in {"wide", "tele", "stack"}:
+        camera = "tele"
     jpeg = session.frames.get(camera)
     if not jpeg:
         return web.Response(status=404, text="No frame yet")

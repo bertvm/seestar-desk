@@ -1,0 +1,8 @@
+.git
+.venv
+**/__pycache__
+*.pem
+docker-data
+.DS_Store
+tests
+*.egg-info

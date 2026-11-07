@@ -6,14 +6,53 @@ import zlib
 from array import array
 from pathlib import Path
 
-from seestar_desk.album import download_files, list_albums, list_folder
+from datetime import datetime, timezone
+
+from seestar_desk.album import delete_files, download_files, list_albums, list_folder
 from seestar_desk.catalog import targets
 from seestar_desk.discovery import discover
 from seestar_desk.errors import ScopeError
 from seestar_desk.fake_scope import FakeScope
 from seestar_desk.framing import LineBuffer, dumps
 from seestar_desk.imaging import JPEG, PREVIEW, RAW, FrameParser, build_frame, to_jpeg
-from seestar_desk.session import ScopeSession
+from seestar_desk.session import ScopeSession, _absorb_device, _absorb_disk, _absorb_location
+from seestar_desk.sky import alt_az, best_tonight, field_of_view, mosaic_centers, skip_reasons, sun_altitude
+
+
+class ReadingTests(unittest.TestCase):
+    def test_firmware_reports_storage_and_battery(self) -> None:
+        state: dict = {}
+        _absorb_disk(state, {"totalMB": 106330, "freeMB": 106071})
+        self.assertEqual(state["disk_free"], 106071)
+        self.assertEqual(state["disk_total"], 106330)
+        _absorb_device(
+            state,
+            {
+                "device": {"product_model": "Seestar S50 Pro"},
+                "pi_status": {
+                    "battery_capacity": 93,
+                    "charge_online": False,
+                    "charger_status": "Discharging",
+                    "temp": 30.2,
+                },
+                "storage": {
+                    "cur_storage": "emmc",
+                    "storage_volume": [{"name": "emmc", "freeMB": 106071, "diskSizeMB": 119279}],
+                },
+            },
+        )
+        self.assertEqual(state["battery"], 93)
+        self.assertIs(state["charging"], False)
+        self.assertEqual(state["disk_free"], 106071)
+        self.assertEqual(state["disk_total"], 119279)
+        self.assertEqual(state["temperature"], 30.2)
+        located: dict = {}
+        _absorb_location(located, [5.12, 52.09])
+        self.assertEqual(located["longitude"], 5.12)
+        self.assertEqual(located["latitude"], 52.09)
+        _absorb_location(located, {"location_lon_lat": [4.5, 51.9]})
+        self.assertEqual(located["longitude"], 4.5)
+        self.assertEqual(located["latitude"], 51.9)
 
 
 class FramingTests(unittest.TestCase):
@@ -93,6 +132,16 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.session.disconnect()
         await self.fake.close()
+
+    async def test_location_and_clock_are_read(self) -> None:
+        self.assertEqual(self.session.state["latitude"], 52.09)
+        self.assertEqual(self.session.state["longitude"], 5.12)
+        self.assertEqual(self.session.state["clock"], "2026-11-07 21:04:00")
+        self.assertEqual(self.session.state["temperature"], 31.4)
+        self.assertEqual(self.session.state["ip"], "192.168.4.1")
+        self.assertEqual(self.session.state["wifi_signal"], 80)
+        self.assertEqual(self.session.state["firmware_label"], "9.75")
+        self.assertEqual(self.session.state["disk_free"], 42000)
 
     async def test_events_and_motion_after_claim(self) -> None:
         self.assertEqual(self.session.state["model"], "S50 Pro")
@@ -223,6 +272,101 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             if previous is not None:
                 os.environ["SEESTAR_KEY_PATH"] = previous
+
+
+    async def test_live_view_and_stack_progress(self) -> None:
+        await self.session.claim()
+        await self.session.live("tele", True)
+        for _ in range(30):
+            if self.session.frames.get("tele"):
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(self.session.frames.get("tele", b"").startswith(b"\xff\xd8"))
+        await self.session.stack(True, 80)
+        self.assertEqual(self.session.state["stack"]["stacked"], 3)
+        self.assertEqual(self.session.state["stack"]["dropped"], 1)
+        self.assertEqual(self.session.state["stack"]["elapsed"], 12)
+        for _ in range(30):
+            if self.session.frames.get("stack"):
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(self.session.frames.get("stack", b"").startswith(b"\xff\xd8"))
+
+    async def test_video_wifi_delete_and_plan(self) -> None:
+        await self.session.claim()
+        await self.session.start_video("planet", 0)
+        if self.session._video_task:
+            await self.session._video_task
+        methods = [item.get("method") for item in self.fake.received]
+        self.assertIn("start_scan_planet", methods)
+        self.assertIn("iscope_stop_view", methods)
+        networks = await self.session.wifi_scan()
+        self.assertEqual(networks[0]["ssid"], "Garden")
+        await self.session.wifi_join("Garden", "secret")
+        self.assertEqual(self.session.state["wifi"], "Garden")
+        removed = await delete_files(self.session, "M 42", ["stacked.jpg"])
+        self.assertEqual(removed, ["stacked.jpg"])
+        self.assertEqual(self.fake.deleted[-1], "MyWorks/M 42/stacked.jpg")
+        self.session.state["latitude"] = 51.5
+        self.session.state["longitude"] = -0.1
+        self.session.night.replace(
+            {
+                "items": [
+                    {
+                        "name": "M42",
+                        "ra": 5.583,
+                        "dec": -5.383,
+                        "mode": "star",
+                        "minutes": 0,
+                        "gain": 80,
+                        "filter": 1,
+                        "autofocus": True,
+                        "rows": 1,
+                        "cols": 1,
+                    }
+                ],
+                "safety": {"min_battery": 0, "min_altitude": -90, "stop_before_dawn": False, "max_cloud": 100},
+                "options": {"park_when_finished": False},
+            }
+        )
+        self.session.night.start()
+        assert self.session.night._task is not None
+        await self.session.night._task
+        self.assertEqual(self.session.night.status["step"], "complete")
+        self.assertTrue(any(item.get("method") == "iscope_start_stack" for item in self.fake.received))
+
+    async def test_polar_offset_is_kept(self) -> None:
+        await self.session.claim()
+        await self.session.polar_align(True, 3)
+        self.assertEqual(self.session.state["align"]["x"], 1.2)
+        self.assertEqual(self.session.state["align"]["y"], -0.4)
+
+
+class SkyTests(unittest.TestCase):
+    def test_summer_noon_and_mosaic_grid(self) -> None:
+        noon = datetime(2026, 6, 21, 12, tzinfo=timezone.utc)
+        midnight = datetime(2026, 12, 21, 0, tzinfo=timezone.utc)
+        self.assertGreater(sun_altitude(51.5, 0, noon), 40)
+        self.assertLess(sun_altitude(51.5, 0, midnight), -18)
+        lst_ra = 5.0
+        high, _az = alt_az(lst_ra, 51.5, 51.5, 0, noon)
+        self.assertGreater(high, -90)
+        centers = mosaic_centers(5.5, 10, 2, 2, 20, *field_of_view("S50 Pro"))
+        self.assertEqual(len(centers), 4)
+        self.assertEqual(len({(round(item["ra"], 4), round(item["dec"], 4)) for item in centers}), 4)
+        reasons = skip_reasons(altitude=10, battery=15, sun_alt=-20, cloud=90, safety={"min_altitude": 25, "min_battery": 20, "stop_before_dawn": True, "max_cloud": 80})
+        self.assertEqual(len(reasons), 3)
+
+    def test_best_pick_is_high_during_the_dark_hours(self) -> None:
+        evening = datetime(2026, 11, 7, 18, tzinfo=timezone.utc)
+        report = best_tonight(52.34, 6.11, evening)
+        self.assertEqual(report["window"]["darkness"], "astronomical night")
+        self.assertGreaterEqual(report["picks"][0]["peak_altitude"], 50)
+        self.assertGreater(report["picks"][0]["dec"], 0)
+        self.assertEqual(report["picks"], sorted(report["picks"], key=lambda item: item["score"], reverse=True))
+        noon = datetime(2026, 6, 21, 12, tzinfo=timezone.utc)
+        summer = best_tonight(52.34, 6.11, noon)
+        self.assertGreater(summer["window"]["start"], noon.isoformat())
 
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):

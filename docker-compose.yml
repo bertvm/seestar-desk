@@ -1,0 +1,13 @@
+services:
+  desk:
+    build: .
+    image: seestar-desk
+    container_name: seestar-desk
+    restart: unless-stopped
+    # UDP discovery and the telescope's control port stay on the Docker host's LAN.
+    network_mode: host
+    environment:
+      HOME: /data
+      SEESTAR_KEY_PATH: /data/seestar.pem
+    volumes:
+      - ./docker-data:/data

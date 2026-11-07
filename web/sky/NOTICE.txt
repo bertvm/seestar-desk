@@ -1,0 +1,7 @@
+Stellarium Web Engine
+Copyright (c) 2022 Stellarium Labs SRL
+License: GNU Affero General Public License v3. See LICENSE-AGPL-3.0.txt.
+Source: https://github.com/Stellarium/stellarium-web-engine
+Commit built for this desk: 2103935134e09ba1715171241769fce03cebebe4
+
+The star, deep-sky, Milky Way, and western constellation files in data/ come from that repository’s apps/test-skydata directory, under the same license.

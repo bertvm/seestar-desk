@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 from seestar_desk.discovery import FoundScope
 from seestar_desk.framing import LineBuffer, dumps
-from seestar_desk.imaging import JPEG, build_frame
+from seestar_desk.imaging import JPEG, PREVIEW, build_frame
 from seestar_desk.session import GUEST_OK
 
 READ_ONLY = GUEST_OK | {"set_user_location", "pi_set_time", "pi_output_set2"}
@@ -212,11 +212,17 @@ class FakeScope:
     def _followup(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
         if method == "iscope_start_stack" and self.master:
-            return {"Event": "Stack", "state": "working", "stack_count": 1, "dropped_count": 0}
+            return {
+                "Event": "Stack",
+                "state": "working",
+                "stacked_frame": 3,
+                "dropped_frame": 1,
+                "elapsed": 12,
+            }
         if method == "start_auto_focuse" and self.master:
             return {"Event": "AutoFocus", "state": "complete", "position": self.focus}
         if method == "start_polar_align" and self.master:
-            return {"Event": "3PPA", "state": "working", "state_code": 1}
+            return {"Event": "3PPA", "state": "working", "state_code": 1, "x": 1.2, "y": -0.4}
         if method == "iscope_start_view" and self.master:
             return {"Event": "AutoGoto", "state": "complete", "target_name": (message.get("params") or {}).get("target_name")}
         return None
@@ -232,9 +238,11 @@ class FakeScope:
             return {
                 "device": {
                     "name": "Desk demo",
-                    "model": "S50 Pro",
-                    "firmware_ver_int": 8460,
+                    "model": "Seestar S50 Pro",
+                    "firmware_ver_int": 2975,
                     "battery_capacity": 86,
+                    "charge_online": False,
+                    "temp": 31.4,
                 },
                 "mount": {"equ_mode": self.equatorial, "close": self.parked, "track": self.tracking},
                 "storage": {"free_mb": 42000, "total_mb": 58000},
@@ -254,11 +262,34 @@ class FakeScope:
         if method == "get_setting":
             return self.settings
         if method == "pi_station_state":
-            return {"ssid": "Demo-WiFi", "sig_lev": 80}
+            return {
+                "ssid": getattr(self, "station_ssid", "Demo-WiFi"),
+                "sig_lev": 80,
+                "ip": "192.168.4.1",
+            }
+        if method == "pi_station_scan":
+            return [{"ssid": "Garden", "rssi": -55}, {"ssid": "Demo-WiFi", "rssi": -40}]
+        if method == "pi_station_set" and isinstance(params, dict):
+            self.station_ssid = str(params.get("ssid") or "")
+            return "ok"
+        if method == "pi_station_open":
+            return "ok"
+        if method == "start_scan_planet":
+            return "ok"
+        if method == "delete_image":
+            self.deleted = getattr(self, "deleted", [])
+            self.deleted.append(params)
+            return "ok"
         if method == "pi_is_verified":
             return True
+        if method == "get_user_location":
+            return [getattr(self, "longitude", 5.12), getattr(self, "latitude", 52.09)]
+        if method == "set_user_location" and isinstance(params, dict):
+            self.latitude = params.get("lat")
+            self.longitude = params.get("lon")
+            return {"lat": self.latitude, "lon": self.longitude}
         if method == "pi_get_time":
-            return {"year": 2026, "mon": 11, "day": 7, "hour": 21, "min": 0, "sec": 0}
+            return {"year": 2026, "mon": 11, "day": 7, "hour": 21, "min": 4, "sec": 0}
         if method == "scope_speed_move" and isinstance(params, dict):
             self.ra = round((self.ra + 0.02) % 24, 4)
             self.alt = round(self.alt + 0.1, 2)
@@ -315,7 +346,6 @@ class FakeScope:
 
     async def _image(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         buffer = bytearray()
-        frame = build_frame(self.preview, JPEG, 640, 360)
         try:
             while True:
                 data = await reader.read(65536)
@@ -331,10 +361,19 @@ class FakeScope:
                     if not raw:
                         continue
                     message = json.loads(raw)
-                    if message.get("method") in {"begin_streaming", "get_stacked_img", "get_current_img"}:
-                        writer.write(frame)
-                    writer.write(dumps({"jsonrpc": "2.0", "id": message.get("id"), "method": message.get("method"), "code": 0, "result": "ok"}))
+                    method = message.get("method")
+                    if method == "get_verify_str":
+                        writer.write(dumps({"jsonrpc": "2.0", "id": message.get("id"), "method": method, "code": 103, "error": "method not found"}))
+                        await writer.drain()
+                        continue
+                    if method in {"begin_streaming", "get_current_img"}:
+                        writer.write(build_frame(self.preview, PREVIEW, 640, 360))
+                    elif method == "get_stacked_img":
+                        writer.write(build_frame(self.preview, JPEG, 0, 0))
+                    writer.write(dumps({"jsonrpc": "2.0", "id": message.get("id"), "method": method, "code": 0, "result": "ok"}))
                     await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            return
         finally:
             writer.close()
 
