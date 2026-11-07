@@ -46,6 +46,15 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(state["disk_free"], 106071)
         self.assertEqual(state["disk_total"], 119279)
         self.assertEqual(state["temperature"], 30.2)
+        _absorb_device(
+            state,
+            {
+                "balance_sensor": {"code": 0, "data": {"x": 0.01, "y": -0.02, "z": 1.0, "angle": 1.3}},
+                "compass_sensor": {"code": 0, "data": {"direction": 184.2, "cali": 0}},
+            },
+        )
+        self.assertEqual(state["level"]["angle"], 1.3)
+        self.assertEqual(state["heading"], 184.2)
         located: dict = {}
         _absorb_location(located, [5.12, 52.09])
         self.assertEqual(located["longitude"], 5.12)

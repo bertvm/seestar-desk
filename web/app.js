@@ -22,6 +22,7 @@ const state = {
   starChart: localStorage.getItem("seestar-starchart") === "gaia" ? "gaia" : "stellarium",
   starDepth: localStorage.getItem("seestar-starmag") === "12" ? 12 : 7,
   theme: "night",
+  alignTimer: 0,
 };
 
 const themes = [
@@ -51,6 +52,7 @@ function show(page) {
     button.classList.toggle("active", button.dataset.page === page);
   });
   render();
+  syncAlignTimer();
   if (page === "picture" && state.snap && state.snap.connected && !state.snap.parked) startLive(state.camera || "tele");
 }
 
@@ -348,8 +350,12 @@ function paintMeters() {
     else if (key === "align") node.textContent = alignText(snap);
     else if (key === "plan") node.textContent = planStatus(snap);
     else if (key === "tracking") node.textContent = snap.tracking ? "On" : "Off";
-    else if (key === "mount") node.textContent = snap.equatorial ? "Equatorial" : "Alt-az";
+    else if (key === "mount") node.textContent = snap.equatorial ? "Equatorial" : snap.equatorial === false ? "Alt-az" : "—";
+    else if (key === "arm") node.textContent = snap.parked ? "Folded" : snap.parked === false ? "Open" : "—";
+    else if (key === "heading") node.textContent = headingText(snap.heading);
   });
+  paintLevel(snap);
+  paintPolar(snap);
   const liveSeq = snap.frame_seq && snap.frame_seq[state.camera];
   const stackSeq = snap.frame_seq && snap.frame_seq.stack;
   if (snap.parked) {
@@ -481,6 +487,95 @@ function gotoText(snap) {
   return [view.stage, view.state, view.percent !== undefined && view.percent !== null ? `${view.percent}%` : "", view.error]
     .filter((part) => part !== undefined && part !== null && part !== "" && part !== "none")
     .join(" · ") || "Waiting for a slew";
+}
+
+function headingText(degrees) {
+  const value = Number(degrees);
+  if (!Number.isFinite(value)) return "—";
+  const circle = ((value % 360) + 360) % 360;
+  const names = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+  return `${names[Math.round(circle / 22.5) % 16]} ${circle.toFixed(0)}°`;
+}
+
+function levelVector(snap) {
+  const sensor = snap.level || {};
+  const x = Number(sensor.x);
+  const y = Number(sensor.y);
+  const z = Number(sensor.z);
+  const reported = Number(sensor.angle);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    return Number.isFinite(reported) ? { x: 0, y: 0, angle: reported } : null;
+  }
+  const tiltX = Math.atan2(x, z) * 180 / Math.PI;
+  const tiltY = Math.atan2(y, z) * 180 / Math.PI;
+  const angle = Number.isFinite(reported) ? reported : Math.hypot(tiltX, tiltY);
+  return { x: tiltX, y: tiltY, angle };
+}
+
+function paintLevel(snap) {
+  const bubble = document.querySelector("#level-bubble .dot");
+  const angle = document.querySelector('[data-field="level-angle"]');
+  const note = document.querySelector('[data-field="level-note"]');
+  const tilt = document.querySelector('[data-field="base-tilt"]');
+  const target = document.querySelector('[data-field="wedge-target"]');
+  const point = document.querySelector('[data-field="wedge-point"]');
+  const status = document.querySelector('[data-field="eq-status"]');
+  const reading = levelVector(snap);
+  const latitude = Number(snap.latitude);
+  const miss = reading && snap.equatorial && Number.isFinite(latitude) ? Math.abs(reading.angle - Math.abs(latitude)) : reading ? reading.angle : 99;
+  if (bubble) {
+    const scale = 5;
+    const dx = reading ? Math.max(-1, Math.min(1, reading.x / scale)) : 0;
+    const dy = reading ? Math.max(-1, Math.min(1, reading.y / scale)) : 0;
+    bubble.style.left = `${50 + dx * 42}%`;
+    bubble.style.top = `${50 - dy * 42}%`;
+  }
+  if (angle) {
+    angle.textContent = reading ? `${reading.angle.toFixed(1)}°` : "—";
+    angle.classList.toggle("good", Boolean(reading && miss < 0.5));
+    angle.classList.toggle("warn", Boolean(reading && miss >= 0.5 && miss < (snap.equatorial ? 2 : 1.5)));
+    angle.classList.toggle("bad", Boolean(reading && miss >= (snap.equatorial ? 2 : 1.5)));
+  }
+  if (tilt) tilt.textContent = reading ? `${reading.angle.toFixed(1)}°` : "—";
+  if (target) target.textContent = Number.isFinite(latitude) ? `${Math.abs(latitude).toFixed(1)}°` : "—";
+  if (point) {
+    const pole = Number.isFinite(latitude) && latitude < 0 ? "south" : "north";
+    point.textContent = snap.heading === undefined || snap.heading === null ? `True ${pole}` : `${headingText(snap.heading)}, true ${pole}`;
+  }
+  if (note) {
+    if (!reading) note.textContent = "The level appears after the telescope connects. The scale is 5° at the edge.";
+    else if (snap.equatorial && Number.isFinite(latitude)) {
+      note.textContent = `The base is ${reading.angle.toFixed(1)}° from level. This place needs the wedge near ${Math.abs(latitude).toFixed(1)}°.`;
+    } else if (reading.angle < 0.5) note.textContent = "Level. The dot is inside the small circle.";
+    else if (reading.angle < 1.5) note.textContent = "Close. A small tweak to a tripod leg would help. The scale is 5° at the edge.";
+    else note.textContent = "Adjust the tripod legs until the dot sits in the small circle. The scale is 5° at the edge.";
+  }
+  if (status) {
+    if (!snap.connected) status.textContent = "Connect the telescope to read the mount.";
+    else if (!snap.equatorial) status.textContent = "Alt-az. Put the scope on a wedge before switching.";
+    else if (reading && Number.isFinite(latitude) && Math.abs(reading.angle - Math.abs(latitude)) <= 2) status.textContent = "Equatorial. The wedge tilt matches this place.";
+    else status.textContent = "Equatorial. Check the wedge angle against the latitude.";
+  }
+}
+
+function paintPolar(snap) {
+  const total = document.querySelector('[data-field="pa-total"]');
+  if (!total) return;
+  const align = snap.align || {};
+  const ax = Number(align.x ?? align.eq_offset_az);
+  const ay = Number(align.y ?? align.eq_offset_alt);
+  total.textContent = !Number.isNaN(ax) && !Number.isNaN(ay) ? `${Math.hypot(ax, ay).toFixed(2)}°` : "—";
+}
+
+function syncAlignTimer() {
+  clearInterval(state.alignTimer);
+  state.alignTimer = 0;
+  const repeat = document.querySelector("#align-repeat");
+  if (!repeat || !repeat.checked || state.page !== "align") return;
+  state.alignTimer = setInterval(() => {
+    if (state.page !== "align" || !state.snap || !state.snap.connected) return;
+    post("/align", { action: "recheck" });
+  }, 5000);
 }
 
 function alignText(snap) {
@@ -857,37 +952,70 @@ function renderPicture() {
 }
 
 function renderAlign() {
+  const ready = localStorage.getItem("seestar-eq-ready") === "1";
+  const repeat = localStorage.getItem("seestar-align-repeat") === "1";
   return `
-    <div class="page-head"><h1>Align</h1></div>
+    <div class="page-head"><h1>Level, mount and alignment</h1></div>
     ${banner()}
-    <div class="grid">
-      <section class="card">
-        <h2>Mount</h2>
-        <p>Current mode: <b data-field="mount"></b></p>
-        <p class="muted">Switching mode levels the arm and then parks, which is how the Seestar changes between alt-az and equatorial.</p>
-        <div class="actions">
-          <button id="to-eq">Use equatorial</button>
-          <button id="to-az">Use alt-az</button>
-        </div>
+    <div class="align-board">
+      <section class="card level-card">
+        <h2>Tripod level</h2>
+        <div class="bubble" id="level-bubble" title="The scale is 5 degrees at the edge"><span class="dot"></span></div>
+        <p class="level-readout" data-field="level-angle">—</p>
+        <p class="muted" data-field="level-note">The level appears after the telescope connects.</p>
       </section>
-      <section class="card">
-        <h2>Three-point polar alignment</h2>
-        <p data-field="align"></p>
-        <label>Declination band
-          <select id="dec-band">
-            <option value="2">Lower</option>
-            <option value="3" selected>Overhead</option>
-            <option value="4">Higher</option>
-          </select>
-        </label>
-        <div class="actions">
-          <button class="primary" id="align-start">Start alignment</button>
-          <button id="align-recheck">Recheck</button>
-          <button id="align-stop">Stop</button>
-        </div>
-        <div class="crosshair" id="pa-plot" title="Bring the dot to the center with the wedge knobs"><span class="dot"></span></div>
-        <p class="muted">The dot is the offset the telescope reports. Azimuth is left and right, altitude is up and down. Turn the wedge knobs until it sits in the center.</p>
-      </section>
+      <div class="align-side">
+        <section class="card">
+          <h2>Current setup</h2>
+          <div class="facts">
+            <div class="fact"><span>Mode</span><b data-field="mount">—</b></div>
+            <div class="fact"><span>Arm</span><b data-field="arm">—</b></div>
+            <div class="fact"><span>Tracking</span><b data-field="tracking">—</b></div>
+            <div class="fact"><span>Compass</span><b data-field="heading">—</b></div>
+            <div class="fact"><span>Location</span><b data-field="place">—</b></div>
+          </div>
+          <div class="actions">
+            <button id="open-arm">Open the arm</button>
+            <button class="danger" id="park">Park and fold</button>
+          </div>
+        </section>
+        <section class="card">
+          <h2>Equatorial setup</h2>
+          <div class="facts">
+            <div class="fact"><span>Set the wedge to</span><b data-field="wedge-target">—</b></div>
+            <div class="fact"><span>Base tilt from level</span><b data-field="base-tilt">—</b></div>
+            <div class="fact"><span>Point the wedge</span><b data-field="wedge-point">—</b></div>
+            <div class="fact"><span>Status</span><b data-field="eq-status">—</b></div>
+          </div>
+          <label class="row"><input id="eq-ready" type="checkbox"${ready ? " checked" : ""}> The scope is on a wedge, set to this latitude, facing the pole, and the arm can swing freely</label>
+          <div class="actions">
+            <button id="to-eq"${ready ? "" : " disabled"}>Switch to equatorial</button>
+            <button id="to-az">Switch to alt-az</button>
+          </div>
+          <p class="muted">Switching mode levels the arm and then parks. That is how the telescope changes between alt-az and equatorial.</p>
+        </section>
+        <section class="card">
+          <h2>Align the wedge to the pole</h2>
+          <p data-field="align">Not started</p>
+          <p class="level-readout" data-field="pa-total">—</p>
+          <label>Measure in this part of the sky
+            <select id="dec-band">
+              <option value="2">Lower in the sky</option>
+              <option value="3" selected>Overhead</option>
+              <option value="4">Higher, nearer the pole</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button class="primary" id="align-start">Measure polar error</button>
+            <button id="align-recheck">Measure here</button>
+            <button id="align-live"${repeat ? ' class="primary"' : ""}>Live adjust</button>
+            <button id="align-stop">Stop</button>
+          </div>
+          <label class="row"><input id="align-repeat" type="checkbox"${repeat ? " checked" : ""}> Repeat readings automatically, every 5 seconds</label>
+          <div class="crosshair" id="pa-plot" title="Bring the dot to the center with the wedge knobs"><span class="dot"></span></div>
+          <p class="muted">Azimuth is left and right, altitude is up and down. Turn the wedge knobs until the dot sits in the center. Live adjust waits until you let go, then reads again.</p>
+        </section>
+      </div>
     </div>`;
 }
 
@@ -1492,6 +1620,15 @@ function bind() {
   document.querySelectorAll("[data-filter]").forEach((button) => {
     button.onclick = () => post("/filter", { position: Number(button.dataset.filter) });
   });
+  bindClick("#open-arm", () => {
+    if (confirm("This opens the arm out to the horizon.")) post("/horizon", {});
+  });
+  const ready = document.querySelector("#eq-ready");
+  if (ready) ready.onchange = () => {
+    localStorage.setItem("seestar-eq-ready", ready.checked ? "1" : "0");
+    const button = document.querySelector("#to-eq");
+    if (button) button.disabled = !ready.checked;
+  };
   bindClick("#to-eq", () => {
     if (confirm("This levels the arm, then parks into equatorial mode.")) post("/mount", { equatorial: true });
   });
@@ -1500,6 +1637,18 @@ function bind() {
   });
   bindClick("#align-start", () => post("/align", { action: "start", dec_pos_index: document.querySelector("#dec-band")?.value }));
   bindClick("#align-recheck", () => post("/align", { action: "recheck" }));
+  bindClick("#align-live", () => {
+    const box = document.querySelector("#align-repeat");
+    if (!box) return;
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  });
+  const repeat = document.querySelector("#align-repeat");
+  if (repeat) repeat.onchange = () => {
+    localStorage.setItem("seestar-align-repeat", repeat.checked ? "1" : "0");
+    document.querySelector("#align-live")?.classList.toggle("primary", repeat.checked);
+    syncAlignTimer();
+  };
   bindClick("#align-stop", () => post("/align", { action: "stop" }));
   bindClick("#reload-album", loadAlbum);
   document.querySelectorAll("[data-folder]").forEach((button) => {

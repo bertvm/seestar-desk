@@ -1188,6 +1188,20 @@ def _storage_volume(result: dict[str, Any]) -> dict[str, Any] | None:
     return chosen
 
 
+def _sensor_data(block: Any) -> dict[str, Any] | None:
+    if not isinstance(block, dict):
+        return None
+    data = block.get("data") if isinstance(block.get("data"), dict) else block
+    if not isinstance(data, dict):
+        return None
+    kept: dict[str, Any] = {}
+    for key in ("x", "y", "z", "angle", "direction"):
+        value = data.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            kept[key] = value
+    return kept or None
+
+
 def _absorb_device(state: dict[str, Any], result: Any) -> None:
     if not isinstance(result, dict):
         return
@@ -1219,6 +1233,12 @@ def _absorb_device(state: dict[str, Any], result: Any) -> None:
         state["parked"] = bool(mount["close"])
     if "track" in mount:
         state["tracking"] = bool(mount["track"])
+    level = _sensor_data(result.get("balance_sensor"))
+    if level:
+        state["level"] = level
+    heading = _sensor_data(result.get("compass_sensor"))
+    if heading and isinstance(heading.get("direction"), (int, float)) and not isinstance(heading.get("direction"), bool):
+        state["heading"] = heading["direction"]
     if "location_lon_lat" in result:
         _absorb_location(state, result["location_lon_lat"])
     storage = result.get("storage") if isinstance(result.get("storage"), dict) else None

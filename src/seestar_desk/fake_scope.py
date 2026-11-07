@@ -246,6 +246,9 @@ class FakeScope:
                 },
                 "mount": {"equ_mode": self.equatorial, "close": self.parked, "track": self.tracking},
                 "storage": {"free_mb": 42000, "total_mb": 58000},
+                "location_lon_lat": [6.1114, 52.3372],
+                "balance_sensor": {"code": 0, "data": {"x": 0.02, "y": -0.012, "z": 0.999, "angle": 1.32}},
+                "compass_sensor": {"code": 0, "data": {"direction": 12.4}},
             }
         if method in {"scope_get_equ_coord", "scope_get_ra_dec"}:
             return {"ra": self.ra, "dec": self.dec}

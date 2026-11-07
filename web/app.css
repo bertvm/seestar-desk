@@ -634,6 +634,76 @@ button.wide {
   top: 50%;
 }
 
+.align-board {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.15fr);
+  gap: 0.8rem;
+  align-items: start;
+}
+
+.align-side { display: grid; gap: 0.8rem; }
+
+.bubble {
+  position: relative;
+  width: min(100%, 340px);
+  aspect-ratio: 1;
+  margin: 0.4rem auto 0.2rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(circle, transparent 58%, var(--line) 59%, transparent 60%),
+    radial-gradient(circle, transparent 86%, var(--line) 87%, transparent 88%),
+    var(--bg-sink);
+}
+
+.bubble::before {
+  content: "";
+  position: absolute;
+  inset: 38%;
+  border: 2px solid var(--good);
+  border-radius: 50%;
+}
+
+.bubble .dot {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 16px var(--accent);
+  left: 50%;
+  top: 50%;
+}
+
+.level-readout {
+  margin: 0.2rem 0;
+  text-align: center;
+  font-size: 2.4rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.level-readout.good { color: var(--good); }
+.level-readout.warn { color: var(--warn); }
+.level-readout.bad { color: var(--bad); }
+
+.facts { display: grid; margin: 0.2rem 0 0.8rem; }
+.fact {
+  display: grid;
+  grid-template-columns: minmax(6.2rem, 38%) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.38rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.fact span { color: var(--muted); }
+.fact b { font-weight: 600; text-align: right; min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 980px) {
+  .align-board { grid-template-columns: 1fr; }
+}
+
 .file img.mini {
   width: 46px;
   height: 34px;
