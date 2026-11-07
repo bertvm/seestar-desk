@@ -4,6 +4,16 @@ Seestar Desk operates a ZWO Seestar (S30, S50, or S50 Pro) from any browser. A s
 
 You need Python 3.11 or newer, and the telescope on the same network as this computer.
 
+## Screenshots
+
+These are the demo telescope. A connected Seestar fills in the same pages with its own status.
+
+![Overview, with the telescope connected](docs/screenshots/overview.png)
+
+![Sky chart stored on this computer](docs/screenshots/sky.png)
+
+![Level, mount mode, and polar alignment](docs/screenshots/align.png)
+
 ## Start
 
 From this folder:
@@ -33,18 +43,25 @@ Stop it with Ctrl+C in that terminal.
 
 Use this when the desk should run on a Docker host instead of a local server on the PC or Mac. The Docker host has to be on the same network as the telescope. Open the page from any browser at `http://<docker-host>:8731/`.
 
-From this folder, put the signature key where the container can read it, then start the service:
+Clone the repository, put the signature key where the container can read it, then build and start:
 
 ```bash
+git clone https://github.com/bertvm/seestar-desk.git
+cd seestar-desk
 mkdir -p docker-data
-cp ~/.seestar-desk/seestar.pem docker-data/seestar.pem
+cp /path/to/seestar.pem docker-data/seestar.pem
 chmod 600 docker-data/seestar.pem
 docker compose up -d --build
 ```
 
-Rebuild with that same command when the desk changes. `docker compose pull` looks for a public `seestar-desk` image, and there is not one.
+When you want a newer desk, pull the repository and build again. There is no public `seestar-desk` image, so `docker compose pull` fails and is not part of an update.
 
-The service uses the Docker host's own network, so telescope discovery still works. Remembered telescopes are stored in `docker-data/.seestar-desk/scopes.json`. Album copies are stored in `docker-data/Pictures/Seestar Desk`. `docker-data/` is not committed.
+```bash
+git pull
+docker compose up -d --build
+```
+
+The service uses the Docker host's own network, so telescope discovery still works. The container is named `seestar-desk`. Remembered telescopes are stored in `docker-data/.seestar-desk/scopes.json`. Stars kept for the magnitude 12 chart are stored in `docker-data/.seestar-desk/stars`. Album copies are stored in `docker-data/Pictures/Seestar Desk`. `docker-data/` is not committed. The signature key is a file beside that folder, not inside the image. See [The signature key](#the-signature-key).
 
 ```bash
 docker compose logs -f
@@ -52,24 +69,24 @@ docker compose stop
 docker compose down
 ```
 
-If the overview does not list the telescope, add it by its IP address. The key is mounted at runtime and is not built into the image.
+If the overview does not list the telescope, add it by its IP address.
 
 ## Use
 
 1. Turn the Seestar on and join its Wi-Fi, or put the telescope and this computer on the same home network.
-2. Open the desk. Overview lists telescopes it finds. Choose yours and press **Connect**.
-3. On firmware that still uses a control lock, press **Claim** before moving the telescope. Current S50 Pro firmware has no lock; the button can stay as it is.
+2. Open the desk. Overview lists telescopes it finds. Press **Connect**. Press **Connected** to disconnect.
+3. The control button shows **Watching** or **In control**. Press it to take or release the session. On current S50 Pro firmware the telescope does not lock the session; the button still shows which state the desk is in.
 4. Open a section from the left:
-   - **Overview** shows link, battery, Wi-Fi, disk, and coordinates.
-   - **Sky** shows a star chart. Switch between the Stellarium chart stored on this computer and Gaia, which adds faint stars from the internet. **Best tonight** ranks catalog objects for the telescope’s saved place. Go to a target, watch the slew, and nudge at slow, medium, or fast speed.
-   - **Picture** is live view and the growing stack, with kept frames, rejected frames, and elapsed time. It can also run a mosaic or a planet, moon, or scenery recording.
-   - **Align** switches the mount mode and shows the polar-alignment offset. Parking powers the telescope down, so use it only when you mean to.
-   - **Album** lists saved sessions. Select a whole folder, copy the files, and optionally delete them from the telescope afterwards. Copies land in `~/Pictures/Seestar Desk`.
+   - **Overview** shows the connected telescope, battery, Wi-Fi, storage, firmware, temperature, coordinates, and tonight’s plan.
+   - **Sky** is the star chart for the saved place and the telescope clock. **Stellarium** is stored on this computer, down to magnitude 7. **Gaia** adds fainter stars from the internet. **Magnitude 12** keeps stars from magnitude 8 through 12 on this computer after the map first asks for them, in `~/.seestar-desk/stars`. **Best tonight** ranks catalog objects for the dark hours ahead. Go to a target, or add it to the plan.
+   - **Picture** opens the live view. Choose the telephoto or wide camera, nudge, focus, change the filter, start or stop a stack, run a mosaic, or record a planet, the Moon, or scenery. **Play on TV** opens a full-screen page for Chromecast or AirPlay. The TV has to be able to open the desk’s address, so cast from the Docker host or another machine on the network, not from `127.0.0.1`. Parking clears the picture and stops the stream.
+   - **Align** is the level, the mount, and polar alignment. The bubble is the tripod tilt, with 5° at the edge. In equatorial mode the page compares that tilt with the latitude. Switch to equatorial only after confirming the scope is on a wedge, facing the pole, with room for the arm to swing. **Measure polar error** runs the three-point alignment. **Measure here** reads the error without moving to a new declination. **Live adjust** repeats that reading every 5 seconds. **Park and fold** closes the arm and can power the telescope down.
+   - **Album** lists saved sessions. Select files, copy them, and optionally delete them from the telescope afterwards. Copies land in `~/Pictures/Seestar Desk`.
    - **Plan** is the night's list. It shows altitude, twilight, and cloud cover, then slews, focuses, and stacks each target. It skips a target that is too low, a battery that is too low, dawn, or heavy cloud. Parking at the end is off unless you tick it.
-   - **Settings** holds location, clock, dew heater, Wi-Fi, and power. Set the location before Plan can judge altitude and darkness.
+   - **Settings** holds the theme (Night, Slate, Pine, or Daylight), the saved place, the telescope clock, the dew heater, Wi-Fi, and power. Set the location before Plan or Best tonight can judge altitude and darkness.
 5. **Restart** and **Shut down** ask for confirmation, then power-cycle or turn off the telescope.
 
-The desk remembers telescopes in `~/.seestar-desk/scopes.json`.
+The desk remembers telescopes in `~/.seestar-desk/scopes.json`. On a Docker host that file is `docker-data/.seestar-desk/scopes.json`.
 
 ## The signature key
 
@@ -85,7 +102,38 @@ The desk looks for a PEM file in this order and uses the first one it finds:
 4. `~/.seestar-desk/seestar.pem`
 5. The Seestar app on this Mac, at `/Applications/Seestar.app` or `~/Applications/Seestar.app`.
 
+### Add the key to Docker
 
+Inside the container the desk reads `/data/seestar.pem`. That path is the file `docker-data/seestar.pem` on the host. A rebuild does not need to happen after the file is in place. The next connection uses it.
+
+On the Docker host, from the `seestar-desk` folder:
+
+```bash
+mkdir -p docker-data
+cp /path/to/seestar.pem docker-data/seestar.pem
+chmod 600 docker-data/seestar.pem
+```
+
+From another computer, create the folder first, then copy the file. Copying straight into a missing `docker-data` folder fails.
+
+```bash
+ssh user@docker-host 'mkdir -p ~/seestar-desk/docker-data'
+scp seestar.pem user@docker-host:~/seestar-desk/docker-data/seestar.pem
+ssh user@docker-host 'chmod 600 ~/seestar-desk/docker-data/seestar.pem'
+```
+
+Change `user`, `docker-host`, and `~/seestar-desk` to the account, address, and folder you actually use.
+
+If the PEM is already on the host, for example in your home directory, this puts it in the running container. The Compose volume keeps it at `docker-data/seestar.pem`.
+
+```bash
+docker cp ~/seestar.pem seestar-desk:/data/seestar.pem
+docker exec seestar-desk chmod 600 /data/seestar.pem
+```
+
+Use the container’s real name if it is not `seestar-desk`. Check with `docker ps`.
+
+Do not commit this file. `docker-data/` and `*.pem` are gitignored.
 
 ### No Seestar app on this computer
 
