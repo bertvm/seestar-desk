@@ -1,6 +1,6 @@
 # Seestar Desk
 
-Seestar Desk operates a ZWO Seestar (S30, S50, or S50 Pro) from any browser. A small Python program on your computer talks to the telescope and serves the page. Planner and weather are not in this version. Solar imaging and firmware updates stay in the official Seestar app.
+Seestar Desk operates a ZWO Seestar (S30, S50, or S50 Pro) from any browser. A small Python program talks to the telescope and serves the page. It can run on this computer or, with Docker Compose, on a Docker host on the same network. Solar imaging and firmware updates stay in the official Seestar app.
 
 You need Python 3.11 or newer, and the telescope on the same network as this computer.
 
@@ -59,7 +59,7 @@ If the overview does not list the telescope, add it by its IP address. The key i
 3. On firmware that still uses a control lock, press **Claim** before moving the telescope. Current S50 Pro firmware has no lock; the button can stay as it is.
 4. Open a section from the left:
    - **Overview** shows link, battery, Wi-Fi, disk, and coordinates.
-   - **Sky** goes to a catalog target, shows the slew progress, and nudges at slow, medium, or fast speed.
+   - **Sky** shows a star chart. Switch between the Stellarium chart stored on this computer and Gaia, which adds faint stars from the internet. **Best tonight** ranks catalog objects for the telescope’s saved place. Go to a target, watch the slew, and nudge at slow, medium, or fast speed.
    - **Picture** is live view and the growing stack, with kept frames, rejected frames, and elapsed time. It can also run a mosaic or a planet, moon, or scenery recording.
    - **Align** switches the mount mode and shows the polar-alignment offset. Parking powers the telescope down, so use it only when you mean to.
    - **Album** lists saved sessions. Select a whole folder, copy the files, and optionally delete them from the telescope afterwards. Copies land in `~/Pictures/Seestar Desk`.
