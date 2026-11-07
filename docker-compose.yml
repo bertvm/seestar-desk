@@ -2,6 +2,8 @@ services:
   desk:
     build: .
     image: seestar-desk
+    # Built here. There is no public image to pull.
+    pull_policy: build
     container_name: seestar-desk
     restart: unless-stopped
     # UDP discovery and the telescope's control port stay on the Docker host's LAN.

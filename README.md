@@ -42,6 +42,8 @@ chmod 600 docker-data/seestar.pem
 docker compose up -d --build
 ```
 
+Rebuild with that same command when the desk changes. `docker compose pull` looks for a public `seestar-desk` image, and there is not one.
+
 The service uses the Docker host's own network, so telescope discovery still works. Remembered telescopes are stored in `docker-data/.seestar-desk/scopes.json`. Album copies are stored in `docker-data/Pictures/Seestar Desk`. `docker-data/` is not committed.
 
 ```bash
