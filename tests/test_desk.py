@@ -1,0 +1,241 @@
+import asyncio
+import os
+import struct
+import unittest
+import zlib
+from array import array
+from pathlib import Path
+
+from seestar_desk.album import download_files, list_albums, list_folder
+from seestar_desk.catalog import targets
+from seestar_desk.discovery import discover
+from seestar_desk.errors import ScopeError
+from seestar_desk.fake_scope import FakeScope
+from seestar_desk.framing import LineBuffer, dumps
+from seestar_desk.imaging import JPEG, PREVIEW, RAW, FrameParser, build_frame, to_jpeg
+from seestar_desk.session import ScopeSession
+
+
+class FramingTests(unittest.TestCase):
+    def test_splits_partial_lines(self) -> None:
+        buffer = LineBuffer()
+        first = dumps({"id": 1, "method": "test_connection"})
+        second = dumps({"Event": "PiStatus", "battery_capacity": 80})
+        self.assertEqual(buffer.feed(first[:8]), [])
+        messages = buffer.feed(first[8:] + second)
+        self.assertEqual(messages[0]["method"], "test_connection")
+        self.assertEqual(messages[1]["Event"], "PiStatus")
+
+
+class ImageTests(unittest.TestCase):
+    def test_json_then_jpeg_frame(self) -> None:
+        payload = b"\xff\xd8\xff\xd9"
+        frame = build_frame(payload, JPEG, 0, 0)
+        blob = b'{"id":1,"method":"test_connection","code":0,"result":"ok"}\r\n' + frame
+        parser = FrameParser()
+        items = parser.feed(blob[:6])
+        items += parser.feed(blob[6:])
+        self.assertEqual(items[0][0], "json")
+        self.assertEqual(items[1][0], "frame")
+        self.assertTrue(to_jpeg(items[1][1]).startswith(b"\xff\xd8"))
+
+    def test_raw_and_zip_become_jpeg(self) -> None:
+        pixels = array("H", [800, 4000, 1200] * 4)
+        raw = pixels.tobytes()
+        frame = build_frame(raw, RAW, 2, 2)
+        parsed = FrameParser().feed(frame)[0][1]
+        self.assertTrue(to_jpeg(parsed).startswith(b"\xff\xd8"))
+
+        compressor = zlib.compressobj(wbits=-15)
+        compressed = compressor.compress(raw) + compressor.flush()
+        name = b"raw_data"
+        header = struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0,
+            8,
+            0,
+            0,
+            zlib.crc32(raw) & 0xFFFFFFFF,
+            len(compressed),
+            len(raw),
+            len(name),
+            0,
+        ) + name
+        zipped = FrameParser().feed(build_frame(header + compressed, RAW, 2, 2))[0][1]
+        self.assertTrue(to_jpeg(zipped).startswith(b"\xff\xd8"))
+
+    def test_preview_bayer(self) -> None:
+        pixels = array("H", [100, 200, 300, 400] * 4)
+        frame = build_frame(pixels.tobytes(), PREVIEW, 4, 4, data_type=2)
+        parsed = FrameParser().feed(frame)[0][1]
+        self.assertTrue(to_jpeg(parsed).startswith(b"\xff\xd8"))
+
+
+class CatalogTests(unittest.TestCase):
+    def test_messier_list_is_complete(self) -> None:
+        messier = [item for item in targets() if item["id"].startswith("M")]
+        self.assertEqual(len(messier), 110)
+        self.assertEqual(messier[0]["id"], "M1")
+        orion = next(item for item in messier if item["id"] == "M42")
+        self.assertAlmostEqual(orion["ra"], 5.583, places=2)
+        self.assertLess(orion["dec"], 0)
+
+
+class ScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.fake = FakeScope()
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        await self.session.connect()
+
+    async def asyncTearDown(self) -> None:
+        await self.session.disconnect()
+        await self.fake.close()
+
+    async def test_events_and_motion_after_claim(self) -> None:
+        self.assertEqual(self.session.state["model"], "S50 Pro")
+        self.assertEqual(self.session.state["battery"], 86)
+        with self.assertRaises(ScopeError):
+            await self.session.move(90, 1000, 1)
+        await self.session.claim()
+        before = self.session.state["ra"]
+        await self.session.move(90, 1000, 1)
+        await self.session.command("scope_get_equ_coord")
+        self.assertGreater(self.session.state["ra"], before)
+        self.assertTrue(any(item["method"] == "scope_speed_move" for item in self.fake.received))
+
+    async def test_album_download(self) -> None:
+        folders = await list_albums(self.session)
+        self.assertEqual(folders[0]["name"], "M 42")
+        files = await list_folder(self.session, "M 42")
+        self.assertEqual(files[0]["name"], "stacked.jpg")
+        opened = [item for item in self.fake.received if item.get("method") == "get_img_file_page_number"]
+        self.assertEqual(opened[0]["params"]["dir"], "MyWorks/M 42")
+        dest = Path(self.id().replace(".", "_"))
+        # Keep the download inside the workspace temp via the test directory.
+        dest = Path.cwd() / ".test-downloads"
+        saved = await asyncio.to_thread(
+            download_files, self.session, "M 42", ["stacked_thn.jpg"], dest
+        )
+        self.assertEqual(Path(saved[0]).read_bytes(), self.fake.preview)
+        Path(saved[0]).unlink()
+
+    async def test_verify_flag_is_remembered(self) -> None:
+        await self.session.disconnect()
+        await self.fake.close()
+        self.fake = FakeScope(require_verify=True)
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        await self.session.connect()
+        await self.session.command("get_device_state")
+        self.assertTrue(self.session._verify)
+        sent = [item for item in self.fake.received if item.get("method") == "get_device_state"]
+        self.assertTrue(sent[-1]["params"]["verify"])
+
+    async def test_rejected_verify_is_removed(self) -> None:
+        await self.session.disconnect()
+        await self.fake.close()
+        self.fake = FakeScope(reject_verify=True)
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        await self.session.connect()
+        self.session._verify = True
+        await self.session.command("get_setting")
+        self.assertFalse(self.session._verify)
+
+    async def test_unsupported_claim_still_grants_control(self) -> None:
+        await self.session.disconnect()
+        await self.fake.close()
+        self.fake = FakeScope(master_unsupported=True)
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        await self.session.connect()
+        await self.session.claim()
+        self.assertTrue(self.session.master)
+        self.assertEqual(self.session.state["last_error"], "")
+        await self.session.move(90, 1000, 1)
+        self.assertTrue(any(item.get("method") == "scope_speed_move" for item in self.fake.received))
+
+    async def test_restart_and_shutdown_commands(self) -> None:
+        await self.session.claim()
+        await self.session.power("restart")
+        self.assertFalse(self.session.connected)
+        self.assertTrue(any(item.get("method") == "pi_reboot" for item in self.fake.received))
+        await self.session.connect()
+        await self.session.claim()
+        await self.session.power("shutdown")
+        self.assertTrue(any(item.get("method") == "pi_shutdown" for item in self.fake.received))
+
+    async def test_challenge_is_signed(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        dest = Path.cwd() / ".test-downloads"
+        dest.mkdir(exist_ok=True)
+        pem_path = dest / "test-key.pem"
+        pem_path.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        previous = os.environ.get("SEESTAR_KEY_PATH")
+        os.environ["SEESTAR_KEY_PATH"] = str(pem_path)
+        await self.session.disconnect()
+        await self.fake.close()
+        self.fake = FakeScope(auth_public=key.public_key())
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        try:
+            await self.session.connect()
+            signed = [item for item in self.fake.received if item.get("method") == "verify_client"]
+            self.assertEqual(signed[-1]["params"]["data"], "desk-challenge")
+            self.assertTrue(self.session.connected)
+        finally:
+            if previous is None:
+                os.environ.pop("SEESTAR_KEY_PATH", None)
+            else:
+                os.environ["SEESTAR_KEY_PATH"] = previous
+            pem_path.unlink(missing_ok=True)
+
+    async def test_missing_key_stops_the_connection(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        previous = os.environ.pop("SEESTAR_KEY_PATH", None)
+        await self.session.disconnect()
+        await self.fake.close()
+        self.fake = FakeScope(auth_public=rsa.generate_private_key(public_exponent=65537, key_size=2048).public_key())
+        await self.fake.start()
+        self.session = ScopeSession(self.fake.address())
+        from seestar_desk.auth import find_key
+
+        if find_key() is not None:
+            self.skipTest("a real interoperability key is already installed")
+        try:
+            with self.assertRaises(ScopeError) as caught:
+                await self.session.connect()
+            self.assertIn("seestar.pem", str(caught.exception))
+            self.assertFalse(self.session.connected)
+        finally:
+            if previous is not None:
+                os.environ["SEESTAR_KEY_PATH"] = previous
+
+
+class DiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_udp_beacon(self) -> None:
+        fake = FakeScope()
+        await fake.start_udp()
+        try:
+            found = await discover(timeout=0.4, targets=[("127.0.0.1", fake.udp_port)])
+        finally:
+            await fake.close()
+        self.assertEqual(found[0].host, "127.0.0.1")
+        self.assertEqual(found[0].model, "S50 Pro")
+
+
+if __name__ == "__main__":
+    unittest.main()

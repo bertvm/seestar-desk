@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seestar-desk"
+version = "0.1.0"
+description = "Cross-platform desk for operating a ZWO Seestar from the browser."
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=42",
+    "Pillow>=10",
+]
+
+[project.scripts]
+seestar-desk = "seestar_desk.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+seestar_desk = ["data/*.csv"]
