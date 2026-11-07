@@ -83,17 +83,7 @@ The desk looks for a PEM file in this order and uses the first one it finds:
 4. `~/.seestar-desk/seestar.pem`
 5. The Seestar app on this Mac, at `/Applications/Seestar.app` or `~/Applications/Seestar.app`.
 
-### Mac or iOS app already installed
 
-Nothing to copy. Start the desk. It reads `my_private.pem` inside the app bundle.
-
-To keep a copy that still works if you delete the app:
-
-```bash
-mkdir -p ~/.seestar-desk
-cp "/Applications/Seestar.app/Wrapper/Seestar.app/my_private.pem" ~/.seestar-desk/seestar.pem
-chmod 600 ~/.seestar-desk/seestar.pem
-```
 
 ### No Seestar app on this computer
 
