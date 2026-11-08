@@ -79,6 +79,38 @@ def _messier_number(ident: str) -> int:
     return 0
 
 
+def locate(name: str) -> dict | None:
+    """Match a session name such as ``M 42`` to a catalog object."""
+    compact = _key(name)
+    if len(compact) < 2:
+        return None
+    tokens = _tokens(name)
+    for item in targets():
+        ident = _key(item["id"])
+        title = _key(item["name"])
+        if compact in {ident, title} or ident in tokens or title in tokens:
+            return item
+    return None
+
+
+def _tokens(name: str) -> set[str]:
+    token = []
+    tokens: set[str] = set()
+    for char in name.lower():
+        if char.isalnum():
+            token.append(char)
+        elif token:
+            tokens.add("".join(token))
+            token = []
+    if token:
+        tokens.add("".join(token))
+    return tokens
+
+
+def _key(name: str) -> str:
+    return "".join(char for char in name.lower() if char.isalnum())
+
+
 def search(query: str, limit: int = 40) -> list[dict]:
     needle = query.strip().lower()
     chosen = targets()

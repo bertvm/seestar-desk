@@ -874,12 +874,67 @@ button.wide {
 }
 
 .file img.mini {
-  width: 46px;
-  height: 34px;
+  width: 96px;
+  height: 72px;
   object-fit: cover;
-  border-radius: 0.35rem;
+  border-radius: 0.45rem;
   background: black;
 }
+
+.gallery-section { margin-bottom: 0.9rem; }
+.gallery-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.7fr);
+  gap: 0.9rem;
+  align-items: stretch;
+}
+.gallery-map, .gallery-map.skymap, .skymap-wrap.gallery-map { height: 640px; min-height: 640px; }
+.gallery-view {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 640px;
+  background: var(--bg-sink);
+  border-radius: 0.8rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.gallery-view img, .gallery-view .placeholder {
+  width: 100%;
+  flex: 1;
+  min-height: 420px;
+  object-fit: contain;
+  background: black;
+}
+.gallery-view figcaption { padding: 0.8rem 0.9rem 1rem; }
+.gallery-view h2 { margin: 0 0 0.25rem; }
+.gallery-loose { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-top: 0.8rem; }
+.gallery-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.25rem 0.6rem 0.25rem 0.25rem;
+}
+.gallery-chip img { width: 64px; height: 48px; object-fit: cover; border-radius: 0.4rem; background: black; }
+.gallery-count { margin: 0.7rem 0 0; }
+
+.transfer-window { margin-top: 0.2rem; }
+.transfer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.transfer-head h2 { margin-bottom: 0.2rem; }
+.transfer-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.4fr);
+  gap: 1rem;
+  margin-top: 0.8rem;
+}
+.transfer-grid h3 { margin: 0 0 0.45rem; font-size: 0.95rem; }
+.transfer-list { max-height: 70vh; min-height: 420px; }
 
 .stage .overlay {
   position: absolute;
@@ -1014,4 +1069,7 @@ button.wide {
   .clock, .skyline { display: none; }
   .sky-pick { flex-direction: column; align-items: stretch; }
   .skymap, .skymap-wrap { height: 360px; min-height: 360px; }
+  .gallery-layout, .transfer-grid, .transfer-head { grid-template-columns: 1fr; display: grid; }
+  .gallery-map, .gallery-map.skymap, .skymap-wrap.gallery-map, .gallery-view { height: auto; min-height: 320px; }
+  .transfer-list { min-height: 240px; }
 }

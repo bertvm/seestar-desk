@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+from seestar_desk.catalog import locate
 from seestar_desk.errors import ScopeError
 
 
@@ -45,6 +47,90 @@ def _as_file_list(result: Any) -> list[dict[str, Any]]:
 async def list_albums(session) -> list[dict[str, Any]]:
     response = await session.command("get_albums")
     return parse_albums(response.get("result"))
+
+
+async def gallery_items(session) -> list[dict[str, Any]]:
+    """One sky position for each session, from its name or from a FITS header."""
+    items: list[dict[str, Any]] = []
+    for folder in await list_albums(session):
+        place = locate(str(folder.get("name") or ""))
+        ra = float(place["ra"]) if place else None
+        dec = float(place["dec"]) if place else None
+        if ra is None:
+            ra, dec = await _coords_from_fits(session, str(folder.get("name") or ""))
+        items.append(
+            {
+                "name": folder.get("name") or "",
+                "group": folder.get("group") or "",
+                "count": folder.get("count"),
+                "thumb": folder.get("thumb") or "",
+                "ra": ra,
+                "dec": dec,
+                "kind": (place or {}).get("kind") or "",
+            }
+        )
+    return items
+
+
+async def _coords_from_fits(session, folder: str) -> tuple[float | None, float | None]:
+    try:
+        files = await list_folder(session, folder)
+    except ScopeError:
+        return None, None
+    fit = next((item.get("name") for item in files if str(item.get("name") or "").lower().endswith((".fit", ".fits"))), "")
+    if not fit:
+        return None, None
+    try:
+        header = await _read_head(session.file_url(f"MyWorks/{_safe_part(folder)}/{_safe_part(str(fit))}"))
+    except (ScopeError, urllib.error.URLError, TimeoutError, OSError):
+        return None, None
+    return fits_radec(header)
+
+
+def fits_radec(header: bytes) -> tuple[float | None, float | None]:
+    """Read J2000 hours and degrees from the start of a FITS file."""
+    if not header.startswith(b"SIMPLE"):
+        return None, None
+    cards: dict[str, str] = {}
+    for offset in range(0, len(header) - 79, 80):
+        card = header[offset : offset + 80].decode("latin1", "replace")
+        key = card[:8].strip()
+        if key == "END":
+            break
+        if card[8:10] != "= ":
+            continue
+        cards[key] = card[10:].split("/", 1)[0].strip().strip("'\"")
+    crval = _number(cards.get("CRVAL1", "")), _number(cards.get("CRVAL2", ""))
+    if crval[0] is not None and crval[1] is not None:
+        return crval[0] / 15.0, crval[1]
+    ra = _number(cards.get("OBJCTRA", "") or cards.get("RA", ""))
+    dec = _number(cards.get("OBJCTDEC", "") or cards.get("DEC", ""))
+    if ra is None or dec is None:
+        return None, None
+    if abs(ra) > 24:
+        ra = ra / 15.0
+    return ra, dec
+
+
+def _number(raw: str) -> float | None:
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    parts = text.replace(":", " ").split()
+    if not parts:
+        return None
+    sign = -1.0 if parts[0].startswith("-") else 1.0
+    try:
+        values = [abs(float(part)) for part in parts[:3]]
+    except ValueError:
+        return None
+    while len(values) < 3:
+        values.append(0.0)
+    return sign * (values[0] + values[1] / 60.0 + values[2] / 3600.0)
 
 
 async def list_folder(session, folder: str) -> list[dict[str, Any]]:
@@ -182,6 +268,15 @@ def download_files(session, folder: str, names: list[str], dest: Path) -> list[s
             raise ScopeError(f"Could not download {filename}: {exc.reason}") from exc
         saved.append(str(target))
     return saved
+
+
+async def _read_head(url: str, limit: int = 23040) -> bytes:
+    def read() -> bytes:
+        request = urllib.request.Request(url, headers={"Range": f"bytes=0-{limit - 1}"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read(limit)
+
+    return await asyncio.to_thread(read)
 
 
 def _stream(url: str, target: Path) -> None:

@@ -16,7 +16,7 @@ from typing import Any
 
 from aiohttp import web
 
-from seestar_desk.album import download_files, list_albums, list_folder
+from seestar_desk.album import download_files, gallery_items, list_albums, list_folder
 from seestar_desk.catalog import search
 from seestar_desk.plan import forecast_at
 from seestar_desk.sky import best_tonight, darkness, sun_altitude
@@ -243,6 +243,7 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_post("/api/scopes/{scope_id}/files/delete", remove_files)
     app.router.add_post("/api/scopes/{scope_id}/settings", settings)
     app.router.add_get("/api/scopes/{scope_id}/albums", albums)
+    app.router.add_get("/api/scopes/{scope_id}/gallery", gallery)
     app.router.add_get("/api/scopes/{scope_id}/files", files)
     app.router.add_post("/api/scopes/{scope_id}/download", download)
     app.router.add_get("/api/scopes/{scope_id}/media", media)
@@ -700,6 +701,11 @@ async def settings(request: web.Request) -> web.Response:
 async def albums(request: web.Request) -> web.Response:
     session = await _session(request)
     return web.json_response({"folders": await list_albums(session), "dest": str(request.app["desk"].downloads)})
+
+
+async def gallery(request: web.Request) -> web.Response:
+    session = await _session(request)
+    return web.json_response({"items": await gallery_items(session)})
 
 
 async def files(request: web.Request) -> web.Response:

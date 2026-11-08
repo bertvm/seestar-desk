@@ -9,6 +9,10 @@ const state = {
   folders: [],
   files: [],
   folder: "",
+  gallery: [],
+  galleryPick: "",
+  downloadDest: "",
+  galleryEngine: null,
   layout: localStorage.getItem("seestar-layout") || "cards",
   camera: "tele",
   seq: 0,
@@ -1413,36 +1417,135 @@ function renderAlign() {
 }
 
 function renderAlbum() {
-  const folders = state.folders.map((folder) => `
-    <button data-folder="${escapeHtml(folder.name)}">
-      <span>${escapeHtml(folder.name)}</span>
-      <span class="muted">${escapeHtml(folder.group || "")} · ${folder.count ?? ""}</span>
+  const placed = state.gallery.filter((item) => item.ra !== null && item.ra !== undefined && item.dec !== null && item.dec !== undefined);
+  const loose = state.gallery.filter((item) => item.ra === null || item.ra === undefined || item.dec === null || item.dec === undefined);
+  const pick = galleryItem(state.galleryPick) || placed[0] || state.gallery[0] || null;
+  if (pick) state.galleryPick = pick.name;
+  const looseRow = loose.map((item) => `
+    <button type="button" class="gallery-chip${item.name === state.galleryPick ? " primary" : ""}" data-gallery="${escapeHtml(item.name)}">
+      ${item.thumb ? `<img alt="" src="${gallerySrc(item, false)}">` : ""}
+      <span>${escapeHtml(item.name)}</span>
     </button>`).join("");
-  const files = state.files.map((file) => file.is_dir ? `
-    <div class="file"><span>${escapeHtml(file.name)}</span><span class="muted">Folder</span></div>` : `
-    <label class="file"><span>${fileThumb(file)}<input type="checkbox" name="file" value="${escapeHtml(file.name)}"> ${escapeHtml(file.name)}</span>
-      <span class="muted">${file.size_k ? file.size_k + " KB" : ""}</span></label>`).join("");
-  const thumbs = state.folders.map((folder) => folder.thumb ? `
-    <figure>
-      <img src="${scopePath("/media")}?path=${encodeURIComponent("MyWorks/" + folder.thumb)}" alt="">
-      <figcaption>${escapeHtml(folder.name)}</figcaption>
-    </figure>` : "").join("");
   return `
     <div class="page-head"><h1>Album</h1><button id="reload-album">Refresh</button></div>
     ${banner()}
-    <div class="thumbs">${thumbs}</div>
-    <div class="work" style="margin-top:0.8rem">
-      <section class="card"><h2>Sessions</h2><div class="list">${folders || '<div class="muted">No sessions reported yet.</div>'}</div></section>
-      <section class="card">
-        <h2>${escapeHtml(state.folder || "Files")}</h2>
-        <div class="list">${files}</div>
+    <section class="card gallery-section">
+      <h2>Gallery</h2>
+      <p class="muted">Each picture sits on the sky at the place it was taken. Click one to open it large.</p>
+      <div class="gallery-layout">
+        <div class="skymap-wrap gallery-map">
+          <canvas id="gallery-map" class="skymap gallery-map"></canvas>
+          <div class="placeholder" id="gallery-status">${state.selected ? "Loading the sky…" : "Connect a telescope to place its pictures."}</div>
+        </div>
+        <figure class="gallery-view">
+          ${pick && pick.thumb ? `<img id="gallery-photo" alt="${escapeHtml(pick.name)}" src="${gallerySrc(pick, true)}">` : `<div class="placeholder" id="gallery-photo-empty">${state.gallery.length ? "This session has no preview." : "No pictures yet."}</div>`}
+          <figcaption>
+            <h2 id="gallery-name">${escapeHtml(pick ? pick.name : "No picture selected")}</h2>
+            <p class="muted" id="gallery-place">${escapeHtml(galleryCaption(pick))}</p>
+          </figcaption>
+        </figure>
+      </div>
+      ${looseRow ? `<div class="gallery-loose"><p class="muted">These sessions have no sky position yet.</p>${looseRow}</div>` : ""}
+      <p class="muted gallery-count">${placed.length} on the sky${loose.length ? ` · ${loose.length} without a position` : ""}</p>
+    </section>
+    <section class="card transfer-window">
+      <div class="transfer-head">
+        <div>
+          <h2>File transfer</h2>
+          <p class="muted">Copies are saved on this computer${state.downloadDest ? ` in ${escapeHtml(state.downloadDest)}` : ""}.</p>
+        </div>
         <div class="actions">
           <button type="button" id="select-all">Select all files</button>
           <button class="primary" id="copy">Copy selected to this computer</button>
         </div>
-        <label class="row"><input id="delete-after" type="checkbox"> Delete the selected files from the telescope after the copy</label>
-      </section>
-    </div>`;
+      </div>
+      <div class="transfer-grid">
+        <div>
+          <h3>Sessions</h3>
+          <div class="list transfer-list" id="session-list">${sessionButtons() || '<div class="muted">No sessions reported yet.</div>'}</div>
+        </div>
+        <div>
+          <h3 id="file-heading">${escapeHtml(state.folder || "Files")}</h3>
+          <div class="list transfer-list" id="file-list">${fileRows()}</div>
+          <label class="row"><input id="delete-after" type="checkbox"> Delete the selected files from the telescope after the copy</label>
+        </div>
+      </div>
+    </section>`;
+}
+
+function sessionButtons() {
+  return state.folders.map((folder) => `
+    <button data-folder="${escapeHtml(folder.name)}" class="${folder.name === state.folder ? "primary" : ""}">
+      <span>${escapeHtml(folder.name)}</span>
+      <span class="muted">${escapeHtml(folder.group || "")} · ${folder.count ?? ""}</span>
+    </button>`).join("");
+}
+
+function fileRows() {
+  if (!state.files.length) return '<div class="muted">Open a session to see its files.</div>';
+  return state.files.map((file) => file.is_dir ? `
+    <div class="file"><span>${escapeHtml(file.name)}</span><span class="muted">Folder</span></div>` : `
+    <label class="file"><span>${fileThumb(file)}<input type="checkbox" name="file" value="${escapeHtml(file.name)}"> ${escapeHtml(file.name)}</span>
+      <span class="muted">${file.size_k ? file.size_k + " KB" : ""}</span></label>`).join("");
+}
+
+function galleryItem(name) {
+  return state.gallery.find((item) => item.name === name) || null;
+}
+
+function gallerySrc(item, large) {
+  let path = String(item.thumb || "");
+  if (large) path = path.replace(/_thn(?=\.)/i, "");
+  return `${scopePath("/media")}?path=${encodeURIComponent("MyWorks/" + path)}`;
+}
+
+function galleryCaption(item) {
+  if (!item) return "Pictures appear here after the telescope reports a session.";
+  if (item.ra === null || item.ra === undefined || item.dec === null || item.dec === undefined) {
+    return "No sky position for this session.";
+  }
+  const kind = item.kind ? `${item.kind} · ` : "";
+  return `${kind}${fmtRA(item.ra)} · ${fmtDec(item.dec)}`;
+}
+
+function selectGallery(name) {
+  const item = galleryItem(name);
+  if (!item) return;
+  state.galleryPick = item.name;
+  const photo = document.querySelector("#gallery-photo");
+  const caption = document.querySelector("#gallery-place");
+  const title = document.querySelector("#gallery-name");
+  if (title) title.textContent = item.name;
+  if (caption) caption.textContent = galleryCaption(item);
+  if (photo && item.thumb) {
+    photo.alt = item.name;
+    photo.dataset.fallback = "";
+    photo.src = gallerySrc(item, true);
+  }
+  document.querySelectorAll("[data-gallery]").forEach((button) => {
+    button.classList.toggle("primary", button.dataset.gallery === item.name);
+  });
+  const engine = state.galleryEngine;
+  if (engine && item.ra !== null && item.ra !== undefined) lookAtHours(engine, item.ra, item.dec, 0.28);
+}
+
+function lookAtHours(engine, raHours, decDeg, fov) {
+  if (!engine || !engine.lookAt) return;
+  const ra = raHours * Math.PI / 12;
+  const dec = decDeg * Math.PI / 180;
+  const scale = Math.cos(dec);
+  engine.lookAt([Math.cos(ra) * scale, Math.sin(ra) * scale, Math.sin(dec)], fov);
+}
+
+function paintTransfer() {
+  const files = document.querySelector("#file-list");
+  const heading = document.querySelector("#file-heading");
+  if (!files) return;
+  if (heading) heading.textContent = state.folder || "Files";
+  files.innerHTML = fileRows();
+  document.querySelectorAll("[data-folder]").forEach((button) => {
+    button.classList.toggle("primary", button.dataset.folder === state.folder);
+  });
 }
 
 function fileThumb(file) {
@@ -2092,9 +2195,22 @@ function bind() {
     button.onclick = () => guard(async () => {
       state.folder = button.dataset.folder;
       state.files = (await api(`${scopePath("/files")}?folder=${encodeURIComponent(state.folder)}`)).files;
-      render();
+      const shot = galleryItem(state.folder);
+      if (shot) selectGallery(shot.name);
+      paintTransfer();
     });
   });
+  document.querySelectorAll("[data-gallery]").forEach((button) => {
+    button.onclick = () => selectGallery(button.dataset.gallery);
+  });
+  const galleryPhoto = document.querySelector("#gallery-photo");
+  if (galleryPhoto) galleryPhoto.onerror = () => {
+    const item = galleryItem(state.galleryPick);
+    if (!item || galleryPhoto.dataset.fallback) return;
+    galleryPhoto.dataset.fallback = "1";
+    galleryPhoto.src = gallerySrc(item, false);
+  };
+  if (document.querySelector("#gallery-map")) mountGallery();
   bindClick("#select-all", () => {
     document.querySelectorAll("input[name=file]").forEach((node) => { node.checked = true; });
   });
@@ -2355,8 +2471,111 @@ async function loadAlbum() {
   if (!state.selected) return;
   const data = await api(scopePath("/albums"));
   state.folders = data.folders;
+  state.downloadDest = data.dest || "";
+  try {
+    state.gallery = (await api(scopePath("/gallery"))).items || [];
+  } catch (error) {
+    state.gallery = [];
+  }
   state.albumLoaded = true;
   if (state.page === "album") render();
+}
+
+function mountGallery() {
+  const canvas = document.querySelector("#gallery-map");
+  if (!canvas || canvas.dataset.booting) return;
+  canvas.dataset.booting = "1";
+  const status = document.querySelector("#gallery-status");
+  loadScript("/static/sky/stellarium-web-engine.js?v=2").then(() => {
+    const created = window.StelWebEngine({
+      canvas,
+      wasmFile: "/static/sky/stellarium-web-engine.wasm?v=2",
+      onReady(engine) {
+        try {
+          prepareGallery(engine);
+          if (status) status.hidden = true;
+          const pick = galleryItem(state.galleryPick);
+          if (pick && pick.ra !== null && pick.ra !== undefined) lookAtHours(engine, pick.ra, pick.dec, 0.9);
+        } catch (error) {
+          if (status) status.textContent = error && error.message ? error.message : "The sky map did not start.";
+        }
+      },
+    });
+    if (created && created.then) return created;
+    return null;
+  }).catch(() => {
+    canvas.dataset.booting = "";
+    if (status) status.textContent = "The sky map did not start.";
+  });
+}
+
+function prepareGallery(engine) {
+  const base = "/static/sky/data/";
+  [[engine.core.stars, base + "stars"], [engine.core.dsos, base + "dso"], [engine.core.milkyway, base + "surveys/milkyway"]].forEach(([module, url]) => {
+    try { module.addDataSource({ url }); } catch (error) { /* a missing survey leaves the chart usable */ }
+  });
+  if (engine.core.dss) engine.core.dss.visible = false;
+  if (engine.core.atmosphere) engine.core.atmosphere.visible = false;
+  try {
+    engine.core.skycultures.addDataSource({ url: base + "skycultures/western", key: "western" });
+    engine.core.constellations.lines_visible = true;
+    engine.core.constellations.labels_visible = true;
+  } catch (error) { /* constellation lines are optional */ }
+  const here = placeNow(state.snap || {});
+  if (here && engine.observer) {
+    engine.observer.latitude = here.latitude * Math.PI / 180;
+    engine.observer.longitude = here.longitude * Math.PI / 180;
+  }
+  state.galleryEngine = engine;
+  state.gallery.filter((item) => item.ra !== null && item.ra !== undefined && item.thumb).forEach((item) => {
+    try {
+      const photo = engine.createObj("photo", { visible: true, url: gallerySrc(item, false) });
+      if (!photo) return;
+      photo.calibration = [{
+        ra: item.ra * 15,
+        dec: item.dec,
+        orientation: 0,
+        pixscale: 6 * 3600 / 640,
+      }];
+      engine.core.add(photo);
+      photo.retain();
+    } catch (error) { /* the chart remains if one picture cannot be placed */ }
+  });
+  engine.on("click", () => {
+    requestAnimationFrame(() => openGalleryNear(engine));
+    return 0;
+  });
+}
+
+function openGalleryNear(engine) {
+  const obj = engine.core && engine.core.selection;
+  if (!obj || !obj.getInfo) return;
+  const vector = obj.getInfo("radec");
+  if (!vector || vector.length < 3) return;
+  let ra = Math.atan2(vector[1], vector[0]);
+  if (ra < 0) ra += Math.PI * 2;
+  ra = ra * 12 / Math.PI;
+  const dec = Math.atan2(vector[2], Math.hypot(vector[0], vector[1])) * 180 / Math.PI;
+  let best = null;
+  let gap = 12;
+  state.gallery.forEach((item) => {
+    if (item.ra === null || item.ra === undefined) return;
+    const distance = angularDistance(item.ra, item.dec, ra, dec);
+    if (distance < gap) {
+      best = item;
+      gap = distance;
+    }
+  });
+  if (best) selectGallery(best.name);
+}
+
+function angularDistance(raHours, decDeg, otherRa, otherDec) {
+  const ra1 = raHours * Math.PI / 12;
+  const ra2 = otherRa * Math.PI / 12;
+  const dec1 = decDeg * Math.PI / 180;
+  const dec2 = otherDec * Math.PI / 180;
+  const step = Math.sin(dec1) * Math.sin(dec2) + Math.cos(dec1) * Math.cos(dec2) * Math.cos(ra1 - ra2);
+  return Math.acos(Math.max(-1, Math.min(1, step))) * 180 / Math.PI;
 }
 
 function drawRose() {

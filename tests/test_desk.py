@@ -9,7 +9,7 @@ from pathlib import Path
 
 from datetime import datetime, timedelta, timezone
 
-from seestar_desk.album import delete_files, download_files, list_albums, list_folder
+from seestar_desk.album import delete_files, download_files, fits_radec, gallery_items, list_albums, list_folder
 from seestar_desk.server import Desk
 from seestar_desk.catalog import targets
 from seestar_desk.discovery import discover
@@ -202,6 +202,25 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(Path(saved[0]).read_bytes(), self.fake.preview)
         Path(saved[0]).unlink()
+        placed = await gallery_items(self.session)
+        self.assertEqual(placed[0]["name"], "M 42")
+        self.assertIsNotNone(placed[0]["ra"])
+        self.assertGreater(placed[0]["dec"], -10)
+        self.assertLess(placed[0]["dec"], 0)
+
+    def test_fits_header_is_read_as_hours(self) -> None:
+        def card(key: str, value: str) -> bytes:
+            return f"{key:<8}= {value}".ljust(80).encode("ascii")
+
+        header = b"".join([
+            card("SIMPLE", "T"),
+            card("CRVAL1", "83.8221"),
+            card("CRVAL2", "-5.3912"),
+            b"END".ljust(80),
+        ])
+        ra, dec = fits_radec(header)
+        self.assertAlmostEqual(ra, 83.8221 / 15.0)
+        self.assertAlmostEqual(dec, -5.3912)
 
     async def test_verify_flag_is_remembered(self) -> None:
         await self.session.disconnect()
