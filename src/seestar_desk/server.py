@@ -8,6 +8,7 @@ import mimetypes
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 mimetypes.add_type("application/wasm", ".wasm")
 from pathlib import Path
@@ -17,7 +18,8 @@ from aiohttp import web
 
 from seestar_desk.album import download_files, list_albums, list_folder
 from seestar_desk.catalog import search
-from seestar_desk.sky import best_tonight
+from seestar_desk.plan import forecast_at
+from seestar_desk.sky import best_tonight, darkness, sun_altitude
 from seestar_desk.discovery import FoundScope, discover
 from seestar_desk.errors import ScopeError
 from seestar_desk.session import ScopeSession
@@ -31,6 +33,7 @@ class Desk:
         self.known: dict[str, FoundScope] = {}
         self.sockets: set[web.WebSocketResponse] = set()
         self.demo_only = False
+        self.place: dict[str, float] | None = None
         self.path = Path.home() / ".seestar-desk" / "scopes.json"
         self.downloads = Path.home() / "Pictures" / "Seestar Desk"
         self._load()
@@ -40,6 +43,9 @@ class Desk:
             saved = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
+        place = saved.get("place") if isinstance(saved, dict) else None
+        if isinstance(place, dict):
+            self.remember_place(place.get("latitude"), place.get("longitude"), store=False)
         for item in saved.get("scopes") or []:
             found = FoundScope(
                 host=item["host"],
@@ -47,16 +53,43 @@ class Desk:
                 model=item.get("model") or "",
                 ssid=item.get("ssid") or "",
             )
+            # Scopes saved before this flag had already been kept.
+            found.raw["linked"] = bool(item["linked"]) if "linked" in item else True
             self.known[found.id] = found
 
     def _save(self) -> None:
         scopes = [
-            {"host": item.host, "name": item.name, "model": item.model, "ssid": item.ssid}
+            {
+                "host": item.host,
+                "name": item.name,
+                "model": item.model,
+                "ssid": item.ssid,
+                "linked": bool(item.raw.get("linked")),
+            }
             for item in self.known.values()
             if not item.raw.get("demo") and item.control_port == 4700
         ]
+        body: dict[str, Any] = {"scopes": scopes}
+        if self.place:
+            body["place"] = self.place
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"scopes": scopes}, indent=2), encoding="utf-8")
+        self.path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+
+    def remember_place(self, latitude: Any, longitude: Any, store: bool = True) -> dict[str, float] | None:
+        try:
+            lat = float(latitude)
+            lon = float(longitude)
+        except (TypeError, ValueError):
+            return None
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            return None
+        place = {"latitude": round(lat, 4), "longitude": round(lon, 4)}
+        if self.place == place:
+            return place
+        self.place = place
+        if store:
+            self._save()
+        return place
 
     def pin(self, found: FoundScope) -> None:
         self.known[found.id] = found
@@ -72,6 +105,12 @@ class Desk:
                     found.image_port = current.image_port
                     found.wide_port = current.wide_port
                     found.http_port = current.http_port
+                    if current.raw.get("linked"):
+                        found.raw["linked"] = True
+                    if not found.model and current.model:
+                        found.model = current.model
+                    if not found.name and current.name:
+                        found.name = current.name
                 self.known[found.id] = found
             self._save()
         return [self.describe(item) for item in self.known.values()]
@@ -86,6 +125,7 @@ class Desk:
             "ssid": found.ssid,
             "connected": bool(session and session.connected),
             "demo": bool(found.raw.get("demo")),
+            "linked": bool(found.raw.get("linked")) or bool(session and session.connected),
         }
 
     def add_host(self, host: str, name: str = "") -> FoundScope:
@@ -106,6 +146,11 @@ class Desk:
             session.on_update = self._on_update
             self.sessions[scope_id] = session
             await session.connect()
+        found.raw["linked"] = True
+        model = session.state.get("model")
+        if isinstance(model, str) and model:
+            found.model = model
+        self._save()
         return session.snapshot()
 
     async def session(self, scope_id: str) -> ScopeSession:
@@ -126,9 +171,33 @@ class Desk:
             self.sockets.discard(socket)
 
     async def _on_update(self, kind: str, payload: dict[str, Any]) -> None:
+        self._remember_payload(payload)
         message = {"type": kind}
         message.update(payload)
         await self.broadcast(message)
+
+    def _remember_payload(self, payload: dict[str, Any]) -> None:
+        self.remember_place(payload.get("latitude"), payload.get("longitude"))
+        self._remember_scope(payload)
+        nested = payload.get("state")
+        if isinstance(nested, dict):
+            self.remember_place(nested.get("latitude"), nested.get("longitude"))
+            self._remember_scope(nested)
+
+    def _remember_scope(self, payload: dict[str, Any]) -> None:
+        found = self.known.get(str(payload.get("id") or ""))
+        if found is None or found.raw.get("demo"):
+            return
+        changed = False
+        model = payload.get("model")
+        if isinstance(model, str) and model and found.model != model:
+            found.model = model
+            changed = True
+        if not found.raw.get("linked"):
+            found.raw["linked"] = True
+            changed = True
+        if changed:
+            self._save()
 
 
 def build_app(desk: Desk) -> web.Application:
@@ -144,6 +213,9 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_get("/api/sky/stars/{tail:.*}", deep_stars)
     app.router.add_get("/api/sky/pictures/{tail:.*}", sky_pictures)
     app.router.add_get("/api/sky/nebula/{name}", sky_nebula)
+    app.router.add_get("/api/place", read_place)
+    app.router.add_post("/api/place", save_place)
+    app.router.add_get("/api/place/weather", place_weather)
     app.router.add_get("/api/scopes", scopes)
     app.router.add_post("/api/discover", do_discover)
     app.router.add_post("/api/scopes", add_scope)
@@ -185,6 +257,34 @@ async def health(_request: web.Request) -> web.Response:
 
 async def catalog(request: web.Request) -> web.Response:
     return web.json_response({"targets": search(request.query.get("q", ""), limit=80)})
+
+
+async def read_place(request: web.Request) -> web.Response:
+    return web.json_response(request.app["desk"].place or {})
+
+
+async def save_place(request: web.Request) -> web.Response:
+    body = await _body(request)
+    place = request.app["desk"].remember_place(body.get("lat", body.get("latitude")), body.get("lon", body.get("longitude")))
+    if place is None:
+        raise web.HTTPBadRequest(text="Enter a latitude and longitude.")
+    return web.json_response(place)
+
+
+async def place_weather(request: web.Request) -> web.Response:
+    place = request.app["desk"].place
+    if not place:
+        raise web.HTTPBadRequest(text="Save a place first.")
+    latitude = float(place["latitude"])
+    longitude = float(place["longitude"])
+    weather = await asyncio.to_thread(forecast_at, latitude, longitude)
+    sun = sun_altitude(latitude, longitude, datetime.now(timezone.utc))
+    return web.json_response({
+        "latitude": latitude,
+        "longitude": longitude,
+        "weather": weather,
+        "sky": {"darkness": darkness(sun), "sun_altitude": round(sun, 1), "note": ""},
+    })
 
 
 async def tonight(request: web.Request) -> web.Response:
@@ -561,7 +661,8 @@ async def plan(request: web.Request) -> web.Response:
     session = await _session(request)
     body = await _body(request)
     action = body.get("action") or "preview"
-    session.night.replace(body)
+    if action != "weather" or "items" in body:
+        session.night.replace(body)
     if action == "weather":
         await session.night.refresh_weather()
         return web.json_response(session.snapshot())
@@ -652,7 +753,11 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
     socket = web.WebSocketResponse(heartbeat=20)
     await socket.prepare(request)
     desk.sockets.add(socket)
-    await socket.send_str(json.dumps({"type": "hello", "scopes": [desk.describe(item) for item in desk.known.values()]}))
+    await socket.send_str(json.dumps({
+        "type": "hello",
+        "scopes": [desk.describe(item) for item in desk.known.values()],
+        "place": desk.place,
+    }))
     try:
         async for _message in socket:
             pass

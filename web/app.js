@@ -22,6 +22,10 @@ const state = {
   starChart: localStorage.getItem("seestar-starchart") === "gaia" ? "gaia" : "stellarium",
   starDepth: localStorage.getItem("seestar-starmag") === "12" ? 12 : 7,
   skyPictures: localStorage.getItem("seestar-skypics") === "1",
+  weatherBusy: false,
+  heaterPower: 50,
+  place: null,
+  forecast: null,
   theme: "night",
   alignTimer: 0,
 };
@@ -29,6 +33,7 @@ const state = {
 const themes = [
   { id: "night", name: "Night", swatch: "#e0b15a" },
   { id: "slate", name: "Slate", swatch: "#7eb6e8" },
+  { id: "blue", name: "Blue", swatch: "#3d9cf0" },
   { id: "pine", name: "Pine", swatch: "#7dcea0" },
   { id: "day", name: "Daylight", swatch: "#8d4e22" },
 ];
@@ -93,9 +98,29 @@ async function guard(work) {
   }
 }
 
+function rememberPlace(latitude, longitude) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  state.place = { latitude: lat, longitude: lon };
+}
+
+function placeNow(snap) {
+  const liveLat = Number(snap && snap.latitude);
+  const liveLon = Number(snap && snap.longitude);
+  if (Number.isFinite(liveLat) && Number.isFinite(liveLon)) return { latitude: liveLat, longitude: liveLon };
+  const saved = state.place;
+  if (!saved) return null;
+  const lat = Number(saved.latitude);
+  const lon = Number(saved.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  return { latitude: lat, longitude: lon };
+}
+
 function placeText(snap) {
-  const lat = Number(snap.latitude);
-  const lon = Number(snap.longitude);
+  const here = placeNow(snap) || {};
+  const lat = Number(here.latitude);
+  const lon = Number(here.longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return "—";
   const ns = lat >= 0 ? "N" : "S";
   const ew = lon >= 0 ? "E" : "W";
@@ -292,45 +317,75 @@ function meter(icon, value, title, tone) {
   return `<span class="meter ${tone || ""}" title="${escapeHtml(title)}">${icon}<b>${value}</b></span>`;
 }
 
-function statusCell(label, value, tone) {
-  return `<div class="stat ${tone || ""}"><span>${escapeHtml(label)}</span><b>${value}</b></div>`;
+function islandChip(label, value, tone) {
+  return `<span class="island ${tone || ""}"><span class="island-copy"><small>${escapeHtml(label)}</small><b>${value}</b></span></span>`;
+}
+
+function scopeIsland(scope) {
+  const live = Boolean(scope.connected);
+  const tone = live ? (scope.master ? "good" : "warn") : "dim";
+  const model = scopeLabel(scope.model);
+  const title = scope.name || model;
+  const line = live
+    ? `${scope.master ? "In control" : "Watching"} · ${activityText(scope)}`
+    : `Not connected · ${model}`;
+  const current = state.selected === scope.id ? " current" : "";
+  return `<button type="button" class="island scope ${tone}${current}" data-scope="${escapeHtml(scope.id)}" title="${escapeHtml(title)}">${scopePicture(scope.model)}<span class="island-copy"><b>${escapeHtml(title)}</b><small>${escapeHtml(line)}</small></span><i class="dot"></i></button>`;
+}
+
+function paintIslands() {
+  const status = document.querySelector("#statusline");
+  if (!status) return;
+  const snap = state.snap && state.snap.connected ? state.snap : null;
+  const scopes = (state.scopes || [])
+    .map(scopeSnap)
+    .filter((scope) => scope.linked || scope.connected || scope.demo);
+  const bits = scopes.length
+    ? scopes.map(scopeIsland)
+    : [`<span class="island dim"><span class="island-copy"><small>Telescope</small><b>Not connected</b></span></span>`];
+  if (snap) {
+    const battery = Number(snap.battery);
+    const batteryTone = Number.isNaN(battery) ? "dim" : battery < 20 ? "bad" : battery < 40 ? "warn" : "good";
+    bits.push(islandChip("Wi-Fi", escapeHtml(signalText(snap.wifi_signal) || snap.wifi || "—"), snap.wifi ? "good" : "dim"));
+    bits.push(islandChip("Activity", escapeHtml(activityText(snap)), ""));
+    bits.push(islandChip("Mount", escapeHtml(snap.equatorial ? "Equatorial" : snap.equatorial === false ? "Alt-az" : "—"), ""));
+    bits.push(islandChip("Battery", escapeHtml(`${fmtNum(snap.battery, "%")}${snap.charging ? " · charging" : ""}`), batteryTone));
+  }
+  const html = bits.join("");
+  if (status.dataset.sig === html) return;
+  status.dataset.sig = html;
+  status.innerHTML = html;
+  status.querySelectorAll("[data-scope]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selected = button.dataset.scope;
+      localStorage.setItem("seestar-scope", state.selected);
+      show("overview");
+    });
+  });
 }
 
 function paintMeters() {
   const snap = state.snap;
   const name = document.querySelector("#scope-name");
-  const status = document.querySelector("#statusline");
   const skyline = document.querySelector("#skyline");
   const mark = document.querySelector("#brand-mark");
   if (!snap) {
     name.textContent = "No telescope";
-    if (status) status.innerHTML = statusCell("Telescope", "Not connected", "dim");
+    paintIslands();
     if (skyline) skyline.innerHTML = `<strong>Connect a telescope</strong><span>Turn it on and search this network.</span>`;
     if (mark) mark.innerHTML = iconMark();
     return;
   }
   name.textContent = `${snap.name || snap.host}${snap.model ? " · " + snap.model : ""}`;
   if (mark) mark.innerHTML = scopePicture(snap.model);
-  const battery = Number(snap.battery);
-  const batteryTone = Number.isNaN(battery) ? "dim" : battery < 20 ? "bad" : battery < 40 ? "warn" : "good";
   const linkMode = snap.connected ? (snap.master ? "control" : "watch") : "off";
   const linkText = linkMode === "control" ? "In control" : linkMode === "watch" ? "Watching" : "Offline";
-  const linkTone = linkMode === "control" ? "good" : linkMode === "watch" ? "warn" : "dim";
   const sky = (snap.plan && snap.plan.sky) || {};
   const skyTitle = sky.darkness ? sky.darkness.charAt(0).toUpperCase() + sky.darkness.slice(1) : "Seestar Desk";
   if (skyline) {
     skyline.innerHTML = `<strong>${escapeHtml(skyTitle)}</strong><span>${escapeHtml(placeText(snap) === "—" ? (snap.model || "Ready when you are") : placeText(snap))}</span>`;
   }
-  if (status) {
-    status.innerHTML = [
-      statusCell("Telescope", escapeHtml(scopeLabel(snap.model)), ""),
-      statusCell("Link", escapeHtml(linkText), linkTone),
-      statusCell("Wi-Fi", escapeHtml(signalText(snap.wifi_signal) || snap.wifi || "—"), snap.wifi ? "good" : "dim"),
-      statusCell("Activity", escapeHtml(activityText(snap)), ""),
-      statusCell("Mount", escapeHtml(snap.equatorial ? "Equatorial" : snap.equatorial === false ? "Alt-az" : "—"), ""),
-      statusCell("Battery", escapeHtml(`${fmtNum(snap.battery, "%")}${snap.charging ? " · charging" : ""}`), batteryTone),
-    ].join("");
-  }
+  paintIslands();
   document.querySelectorAll("[data-field]").forEach((node) => {
     const key = node.dataset.field;
     if (key === "ra") node.textContent = fmtRA(snap.ra);
@@ -377,7 +432,16 @@ function paintMeters() {
   const tonight = document.querySelector("#tonight-list");
   if (tonight) tonight.innerHTML = tonightHtml(snap);
   const conditions = document.querySelector("#conditions");
-  if (conditions) conditions.innerHTML = conditionsHtml(snap);
+  if (conditions) {
+    const html = conditionsHtml(snap);
+    const editing = conditions.contains(document.activeElement);
+    if (!editing && conditions.dataset.sig !== html) {
+      conditions.innerHTML = html;
+      conditions.dataset.sig = html;
+      bindConditions();
+    }
+  }
+  requestWeather(snap);
   drawRose();
   paintReadings();
   const badge = document.querySelector("[data-battery]");
@@ -449,17 +513,116 @@ function tonightHtml(snap) {
 }
 
 function conditionsHtml(snap) {
-  const weather = (snap.plan && snap.plan.weather) || {};
-  const sky = (snap.plan && snap.plan.sky) || {};
-  const rows = [
-    ["Place", placeText(snap)],
-    ["Clock", snap.clock || "—"],
-    ["Sky", sky.darkness || "—"],
-    ["Cloud", weather.cloud_cover === undefined || weather.cloud_cover === null ? "—" : `${Math.round(weather.cloud_cover)}%`],
-    ["Temperature", snap.temperature === null || snap.temperature === undefined || snap.temperature === "" ? "—" : `${fmtNum(snap.temperature, "°")}`],
-    ["Storage", storageView(snap).text],
-  ];
-  return rows.map(([label, value]) => `<div class="cond-row"><span class="muted">${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("");
+  const linked = Boolean(snap && snap.connected);
+  const report = linked ? ((snap && snap.plan) || {}) : (state.forecast || {});
+  const weather = report.weather || {};
+  const sky = report.sky || {};
+  const hours = Array.isArray(weather.hours) ? weather.hours : [];
+  if (!hours.length && !weather.error) {
+    return `<p class="muted">${escapeHtml(sky.darkness ? `${sky.darkness}. The forecast is loading.` : "The forecast loads from the saved place.")}</p>`;
+  }
+  const bars = hours.map((hour) => {
+    const cloud = Number(hour.cloud);
+    const height = Number.isFinite(cloud) ? Math.max(4, Math.min(100, cloud)) : 4;
+    const tone = cloud >= 70 ? "var(--bad)" : cloud >= 40 ? "var(--warn)" : "var(--good)";
+    const title = `${hour.label} · ${Number.isFinite(cloud) ? Math.round(cloud) : "—"}% cloud`;
+    return `<i style="height:${height}%;background:${tone}" title="${escapeHtml(title)}"></i>`;
+  }).join("");
+  const marks = hourMarks(hours);
+  const heaterOn = Boolean((snap.settings || {}).heater_enable);
+  const risk = weather.dew_risk || "—";
+  const riskClass = risk === "High" ? "bad-txt" : risk === "Moderate" ? "warn-txt" : risk === "Low" ? "good-txt" : "";
+  return `
+    <div class="cond-head"><span class="muted">Cloud cover through the night</span><button type="button" id="wx-refresh">Refresh</button></div>
+    ${weather.error ? `<p class="muted">${escapeHtml(weather.error)}</p>` : `<div class="cloud-bars">${bars}</div><div class="cloud-hours">${marks}</div>`}
+    ${condRow("Place", placeText(snap))}
+    ${condRow("Sky", skyLine(sky, hours))}
+    ${condRow("Best observation window", weather.window || weather.note || "—", weather.window ? "good-txt" : "")}
+    ${condRow("Temperature", tempLine(weather, snap))}
+    ${condRow("Wind", windLine(weather))}
+    ${condRow("Humidity", weather.humidity === undefined || weather.humidity === null ? "—" : `${Math.round(weather.humidity)}%`)}
+    ${condRow("Risk of dew", risk, riskClass)}
+    ${linked ? `<div class="cond-row"><span class="muted">Dew heater</span><span class="heater-ctl"><b class="${heaterOn ? "good-txt" : ""}">${heaterOn ? "On" : "Off"}</b><button type="button" id="dew-heater">${heaterOn ? "Turn off" : "Turn on"}</button></span></div>` : ""}
+    ${linked && heaterOn ? `<label class="heater-power">Heater power<input id="dew-power" type="range" min="10" max="100" step="10" value="${state.heaterPower}"><output>${state.heaterPower}%</output></label>` : ""}
+    <p class="muted cond-source">${escapeHtml(weather.source ? `Forecast: ${weather.source}` : "")}</p>`;
+}
+
+function skyLine(sky, hours) {
+  const darkness = sky.darkness || "";
+  if (darkness === "daylight" && hours.length) return `Daylight · dark from ${hours[0].label}`;
+  return darkness || "—";
+}
+
+function condRow(label, value, klass) {
+  return `<div class="cond-row"><span class="muted">${escapeHtml(label)}</span><b class="${klass || ""}">${escapeHtml(value)}</b></div>`;
+}
+
+function hourMarks(hours) {
+  if (!hours.length) return "";
+  const mid = hours[Math.floor((hours.length - 1) / 2)];
+  const picked = [hours[0], mid, hours[hours.length - 1]];
+  return picked.filter((item, index) => picked.findIndex((other) => other.label === item.label) === index)
+    .map((item) => `<span>${escapeHtml(item.label)}</span>`).join("");
+}
+
+function tempLine(weather, snap) {
+  const now = Number(weather.temperature);
+  const low = Number(weather.low);
+  const scope = Number(snap.temperature);
+  const parts = [];
+  if (Number.isFinite(now)) parts.push(`${Math.round(now)}° now`);
+  else if (Number.isFinite(scope)) parts.push(`${Math.round(scope)}° at the telescope`);
+  if (Number.isFinite(low)) parts.push(`low ${Math.round(low)}°`);
+  return parts.join(" · ") || "—";
+}
+
+function windLine(weather) {
+  const speed = Number(weather.wind_speed);
+  if (!Number.isFinite(speed)) return "—";
+  const gust = Number(weather.wind_gust);
+  return `${Math.round(speed)} m/s${Number.isFinite(gust) ? ` · gusts ${Math.round(gust)} m/s` : ""}`;
+}
+
+function bindConditions() {
+  bindClick("#wx-refresh", () => post("/plan", { action: "weather" }));
+  bindClick("#dew-heater", () => {
+    const settings = (state.snap && state.snap.settings) || {};
+    const on = !settings.heater_enable;
+    const power = Number(document.querySelector("#dew-power")?.value || state.heaterPower || 50);
+    if (!confirm(on ? "Turn the dew heater on?" : "Turn the dew heater off?")) return;
+    if (on) state.heaterPower = power;
+    return post("/settings", { heater_enable: on, is_dew_on: on, dew_heater_power: on ? power : 0 });
+  });
+  const power = document.querySelector("#dew-power");
+  if (power) power.onchange = () => {
+    state.heaterPower = Number(power.value);
+    const output = power.parentElement && power.parentElement.querySelector("output");
+    if (output) output.textContent = `${state.heaterPower}%`;
+    post("/settings", { heater_enable: true, is_dew_on: true, dew_heater_power: state.heaterPower });
+  };
+}
+
+function requestWeather(snap) {
+  const here = placeNow(snap || {});
+  if (!here || state.weatherBusy || state.page !== "overview") return;
+  const linked = Boolean(snap && snap.connected && state.selected);
+  const weather = linked ? ((snap.plan && snap.plan.weather) || null) : ((state.forecast && state.forecast.weather) || null);
+  if (weather && !weather.error && (weather.source || weather.note || Array.isArray(weather.hours))) return;
+  if (weather && weather.error && Date.now() - (state.weatherTried || 0) < 120000) return;
+  state.weatherTried = Date.now();
+  state.weatherBusy = true;
+  guard(async () => {
+    try {
+      if (linked) {
+        state.snap = await api(scopePath("/plan"), { method: "POST", body: JSON.stringify({ action: "weather" }) });
+      } else {
+        state.forecast = await api("/api/place/weather");
+      }
+      paintMeters();
+    } finally {
+      state.weatherBusy = false;
+    }
+  });
 }
 
 function stackText(snap) {
@@ -673,33 +836,52 @@ function scopeActions(scope) {
     </div>`;
 }
 
+function scopeBadge(scope, live) {
+  const status = live
+    ? `${scope.master ? "In control" : "Watching"} · ${scope.host}`
+    : `Not connected · ${scope.host}`;
+  const place = live ? `<div class="muted" data-field="place">${escapeHtml(placeText(scope))}</div>` : "";
+  return `
+    <div class="scope-hero">
+      ${scopePicture(scope.model)}
+      <div>
+        <h2>${escapeHtml(scopeLabel(scope.model))}</h2>
+        <div ${live ? 'data-field="link"' : ""}>${escapeHtml(status)}</div>
+        ${place}
+      </div>
+      <div class="batt-badge${live && scope.charging ? " charging" : ""}" ${live ? "data-battery" : ""} title="${escapeHtml(live ? `${fmtNum(scope.battery, "%")}${scope.charging ? ", charging" : ""}` : "Not connected")}">${batteryBadge(live ? scope.battery : null, live && scope.charging)}</div>
+    </div>`;
+}
+
 function renderOverview() {
   const scopes = state.scopes.map(scopeSnap);
   const current = scopes.find((scope) => scope.connected && scope.id === state.selected) || null;
-  const others = scopes.filter((scope) => !current || scope.id !== current.id);
-  const otherRows = others.map((scope) => `
+  const remembered = scopes.filter((scope) => (scope.linked || scope.connected) && (!current || scope.id !== current.id));
+  const fresh = scopes.filter((scope) => !scope.linked && !scope.connected);
+  const past = remembered.map((scope) => `
+    <div class="past-scope">
+      ${scopeBadge(scope, false)}
+      <div class="actions"><button data-connect="${escapeHtml(scope.id)}">Connect</button></div>
+    </div>`).join("");
+  const freshRows = fresh.map((scope) => `
     <div class="night-row">
       <span>${escapeHtml(scope.name || scope.host)} <span class="muted">${escapeHtml(scope.host)}</span></span>
       <button data-connect="${escapeHtml(scope.id)}">Connect</button>
     </div>`).join("");
   const hero = current ? `
-    <div class="scope-hero">
-      ${scopePicture(current.model)}
-      <div>
-        <h2>${escapeHtml(scopeLabel(current.model))}</h2>
-        <div data-field="link">${escapeHtml(current.master ? "In control" : "Watching")} · ${escapeHtml(current.host)}</div>
-        <div class="muted" data-field="place">${escapeHtml(placeText(current))}</div>
-      </div>
-      <div class="batt-badge${current.charging ? " charging" : ""}" data-battery title="${escapeHtml(`${fmtNum(current.battery, "%")}${current.charging ? ", charging" : ""}`)}">${batteryBadge(current.battery, current.charging)}</div>
-    </div>
+    ${scopeBadge(current, true)}
     <div class="wifi-box">
       <div class="kicker">Wi-Fi</div>
       <b data-field="wifi-line">${escapeHtml([current.wifi || "—", signalText(current.wifi_signal), current.ip].filter(Boolean).join(" · "))}</b>
       <div class="muted" data-field="storage-line">${escapeHtml(storageView(current).text)}</div>
     </div>
-    ${scopeActions(current)}` : `
-    <p class="muted">No telescope is connected. Turn it on, then search this network.</p>
-    ${otherRows || ""}`;
+    ${scopeActions(current)}
+    ${past}` : `
+    ${past || `<p class="muted">No telescope is connected. Turn it on, then search this network.</p>`}
+    ${freshRows}`;
+  const title = current
+    ? (current.name || "My telescope")
+    : (remembered.length === 1 ? (remembered[0].name || "My telescope") : remembered.length ? "Telescopes" : "My telescope");
   return `
     ${banner()}
     <section class="panel">
@@ -715,9 +897,8 @@ function renderOverview() {
     <section class="board">
       <article class="panel">
         <p class="kicker">Telescope</p>
-        <h2>${escapeHtml(current ? (current.name || "My telescope") : "My telescope")}</h2>
+        <h2>${escapeHtml(title)}</h2>
         ${hero}
-        ${current && otherRows ? `<div class="wifi-box">${otherRows}</div>` : ""}
       </article>
       <article class="panel">
         <p class="kicker">Current target</p>
@@ -751,7 +932,7 @@ function renderOverview() {
       <article class="panel">
         <p class="kicker">Conditions</p>
         <h2>Tonight</h2>
-        <div id="conditions">${current ? conditionsHtml(current) : `<p class="muted">Location, sky, and weather appear after you connect.</p>`}</div>
+        <div id="conditions">${placeNow(current || {}) ? conditionsHtml(current || {}) : `<p class="muted">Save a place in Settings. The desk also keeps the last place reported by a telescope.</p>`}</div>
       </article>
     </section>
     <form class="manual-add form" id="manual">
@@ -781,7 +962,7 @@ function renderSky() {
     <div class="card sky-pick" id="sky-pick">
       <div>
         <h2 id="sky-pick-name">Click an object</h2>
-        <p class="muted" id="sky-pick-detail">The map uses the telescope’s saved place and clock. View now points the telescope. Add to tonight puts it on the plan.</p>
+        <p class="muted" id="sky-pick-detail">The map uses the saved place and, when the telescope is connected, its clock. View now points the telescope. Add to tonight puts it on the plan.</p>
       </div>
       <div class="actions">
         <button class="primary" id="sky-view" type="button" disabled>View now</button>
@@ -1086,13 +1267,15 @@ function renderPlan() {
       <button type="button" data-drop="${index}">Remove</button>
     </div>`).join("");
   const clouds = weather.cloud_cover === undefined || weather.cloud_cover === null ? "—" : `${weather.cloud_cover}% cloud`;
+  const windowText = weather.window ? ` · clearest ${weather.window}` : "";
+  const dewText = weather.dew_risk ? ` · dew ${weather.dew_risk.toLowerCase()}` : "";
   return `
     <div class="page-head"><h1>Plan</h1><div class="muted" data-field="plan"></div></div>
     ${banner()}
     <section class="card">
       <h2>Tonight</h2>
       <p>${escapeHtml(sky.note || sky.darkness || "Sky not checked yet.")}${sky.sun_altitude !== undefined && sky.sun_altitude !== null ? ` · sun ${sky.sun_altitude}°` : ""}</p>
-      <p class="muted">${escapeHtml(weather.error || `${clouds}${weather.wind_speed !== undefined && weather.wind_speed !== null ? ` · wind ${weather.wind_speed} m/s` : ""}${weather.precipitation ? ` · rain ${weather.precipitation} mm` : ""}`)}</p>
+      <p class="muted">${escapeHtml(weather.error || `${clouds}${windowText}${dewText}${weather.wind_speed !== undefined && weather.wind_speed !== null ? ` · wind ${weather.wind_speed} m/s` : ""}${weather.precipitation ? ` · rain ${weather.precipitation} mm` : ""}`)}</p>
       <div class="actions"><button id="weather" type="button">Refresh sky and weather</button></div>
     </section>
     <form class="card" id="plan-add" style="margin-top:0.8rem">
@@ -1156,11 +1339,11 @@ function renderSettings() {
     </section>
     <form class="card" id="site" style="margin-top:0.8rem">
       <h2>Place and clock</h2>
-      <p class="muted">Saved place <b>${escapeHtml(placeText(snap))}</b></p>
+      <p class="muted">Saved place <b>${escapeHtml(placeText(snap))}</b>. It stays on this computer when the telescope is off.</p>
       <p class="muted">Telescope clock <b>${escapeHtml(snap.clock || "—")}</b></p>
       <div class="form">
-        <label>Latitude<input name="lat" value="${coordValue(snap.latitude)}" placeholder="51.5"></label>
-        <label>Longitude<input name="lon" value="${coordValue(snap.longitude)}" placeholder="-0.12"></label>
+        <label>Latitude<input name="lat" value="${coordValue(placeNow(snap) && placeNow(snap).latitude)}" placeholder="51.5"></label>
+        <label>Longitude<input name="lon" value="${coordValue(placeNow(snap) && placeNow(snap).longitude)}" placeholder="-0.12"></label>
       </div>
       <div class="actions">
         <button class="primary" type="submit">Save location</button>
@@ -1272,11 +1455,10 @@ function readSkyPick(engine) {
 function syncSkyObserver() {
   const engine = state.skyEngine;
   if (!engine || !engine.observer) return;
-  const snap = state.snap || {};
-  const lat = Number(snap.latitude);
-  const lon = Number(snap.longitude);
-  if (Number.isFinite(lat)) engine.observer.latitude = lat * Math.PI / 180;
-  if (Number.isFinite(lon)) engine.observer.longitude = lon * Math.PI / 180;
+  const here = placeNow(state.snap || {});
+  if (!here) return;
+  engine.observer.latitude = here.latitude * Math.PI / 180;
+  engine.observer.longitude = here.longitude * Math.PI / 180;
   if (engine.date2MJD) engine.observer.utc = engine.date2MJD(skyDate(snap.clock));
 }
 
@@ -1371,13 +1553,13 @@ function tonightDetail(item) {
 }
 
 async function loadBestTonight() {
-  const snap = state.snap || {};
-  const lat = Number(snap.latitude);
-  const lon = Number(snap.longitude);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    toast("The telescope has not reported a place yet.");
+  const here = placeNow(state.snap || {});
+  if (!here) {
+    toast("Save a place in Settings. The desk also keeps the last place reported by a telescope.");
     return;
   }
+  const lat = here.latitude;
+  const lon = here.longitude;
   const data = await api(`/api/sky/tonight?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
   const card = document.querySelector("#tonight-card");
   const note = document.querySelector("#tonight-note");
@@ -1734,7 +1916,15 @@ function bind() {
   if (site) site.onsubmit = (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(site));
-    post("/settings", data);
+    guard(async () => {
+      state.place = await api("/api/place", { method: "POST", body: JSON.stringify({ lat: data.lat, lon: data.lon }) });
+      state.forecast = null;
+      if (state.snap && state.snap.connected) await post("/settings", data);
+      else {
+        toast("Place saved. The sky and tonight use it while the telescope is off.");
+        render();
+      }
+    });
   };
   bindClick("#set-clock", () => post("/settings", { set_clock: true }));
   bindClick("#wifi-scan", () => guard(async () => {
@@ -1988,11 +2178,16 @@ function drawRose() {
 }
 
 function applyIncoming(message) {
-  if (message.type === "hello") state.scopes = message.scopes || state.scopes;
+  if (message.type === "hello") {
+    state.scopes = message.scopes || state.scopes;
+    if (message.place && message.place.latitude !== undefined) state.place = message.place;
+  }
   const snap = message.state || (message.type === "state" ? message : null);
   if (snap && snap.host && (!state.selected || snap.id === state.selected)) {
     state.snap = snap;
+    rememberPlace(snap.latitude, snap.longitude);
   }
+  syncSkyObserver();
   if (message.event) state.log = state.log.concat([{ time: "", event: message.event.Event, state: message.event.state, detail: "" }]).slice(-80);
   if (message.type === "frame" && message.seq) {
     state.seq = message.seq;
@@ -2020,7 +2215,10 @@ async function boot() {
     if (!state.selected && state.scopes[0]) state.selected = state.scopes[0].id;
     if (state.selected) {
       try { state.snap = (await api(scopePath("/state"))).state; } catch (error) { /* not connected yet */ }
+      if (state.snap) rememberPlace(state.snap.latitude, state.snap.longitude);
     }
+    const place = await api("/api/place");
+    if (place && place.latitude !== undefined) state.place = place;
   } catch (error) {
     toast(error.message);
   }

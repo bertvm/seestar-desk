@@ -6,15 +6,17 @@ import zlib
 from array import array
 from pathlib import Path
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from seestar_desk.album import delete_files, download_files, list_albums, list_folder
+from seestar_desk.server import Desk
 from seestar_desk.catalog import targets
 from seestar_desk.discovery import discover
 from seestar_desk.errors import ScopeError
 from seestar_desk.fake_scope import FakeScope
 from seestar_desk.framing import LineBuffer, dumps
 from seestar_desk.imaging import JPEG, PREVIEW, RAW, FrameParser, build_frame, to_jpeg
+from seestar_desk.plan import summarize_night
 from seestar_desk.session import ScopeSession, _absorb_device, _absorb_disk, _absorb_location
 from seestar_desk.sky import alt_az, best_tonight, field_of_view, mosaic_centers, skip_reasons, sun_altitude
 
@@ -400,6 +402,58 @@ class SkyTests(unittest.TestCase):
         noon = datetime(2026, 6, 21, 12, tzinfo=timezone.utc)
         summer = best_tonight(52.34, 6.11, noon)
         self.assertGreater(summer["window"]["start"], noon.isoformat())
+
+    def test_tonight_picks_the_clearest_dark_hours(self) -> None:
+        start = datetime(2026, 11, 8, 18, tzinfo=timezone.utc)
+        clouds = [80, 70, 20, 10, 10, 15, 60, 90]
+        samples = []
+        for index, cloud in enumerate(clouds):
+            moment = start + timedelta(hours=index)
+            samples.append({
+                "time": moment,
+                "label": f"{moment.hour:02d}:00",
+                "end": f"{(moment.hour + 1) % 24:02d}:00",
+                "cloud": cloud,
+                "temp": 4.0,
+                "dew": 1.0,
+                "humidity": 80,
+                "wind": 3,
+                "gust": 5,
+            })
+        report = summarize_night(samples, 51.5, -0.1, start)
+        self.assertGreaterEqual(len(report["hours"]), 4)
+        self.assertIn("–", report["window"])
+        self.assertEqual(report["dew_risk"], "Moderate")
+        self.assertLessEqual(report["low"], 4)
+
+
+class DeskMemoryTests(unittest.TestCase):
+    def test_remembered_scopes_keep_a_badge_and_place(self) -> None:
+        desk = Desk()
+        folder = Path(__file__).parent / ".tmp-desk"
+        folder.mkdir(exist_ok=True)
+        desk.path = folder / "scopes.json"
+        desk.known.clear()
+        desk.place = None
+        desk.path.write_text(
+            '{"scopes":[{"host":"10.0.0.8","name":"Garden","model":"Seestar S50 Pro","ssid":"Home"}]}',
+            encoding="utf-8",
+        )
+        desk._load()
+        described = desk.describe(desk.known["10.0.0.8"])
+        self.assertTrue(described["linked"])
+        self.assertEqual(described["model"], "Seestar S50 Pro")
+        self.assertEqual(desk.remember_place(51.5, -0.12), {"latitude": 51.5, "longitude": -0.12})
+        again = Desk()
+        again.path = desk.path
+        again.known.clear()
+        again.place = None
+        again._load()
+        self.assertEqual(again.place["latitude"], 51.5)
+        self.assertTrue(again.describe(again.known["10.0.0.8"])["linked"])
+        added = again.add_host("10.0.0.9", "New")
+        self.assertFalse(again.describe(added)["linked"])
+        folder.joinpath("scopes.json").unlink(missing_ok=True)
 
 
 class DiscoveryTests(unittest.IsolatedAsyncioTestCase):

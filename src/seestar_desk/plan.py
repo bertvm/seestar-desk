@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from seestar_desk.errors import ScopeError
@@ -279,12 +279,18 @@ def _float(value: Any) -> float | None:
         return None
 
 
+def forecast_at(lat: float, lon: float) -> dict[str, Any]:
+    return _open_meteo(lat, lon)
+
+
 def _open_meteo(lat: float, lon: float) -> dict[str, Any]:
     query = urllib.parse.urlencode(
         {
             "latitude": f"{lat:.4f}",
             "longitude": f"{lon:.4f}",
-            "current": "cloud_cover,precipitation,wind_speed_10m",
+            "current": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,wind_speed_10m,wind_gusts_10m",
+            "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,wind_speed_10m,wind_gusts_10m",
+            "forecast_days": "2",
             "timezone": "auto",
         }
     )
@@ -296,12 +302,123 @@ def _open_meteo(lat: float, lon: float) -> dict[str, Any]:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, ValueError) as exc:
         return {"error": f"Weather is unavailable: {exc}"}
-    current = payload.get("current") if isinstance(payload, dict) else {}
-    if not isinstance(current, dict):
+    if not isinstance(payload, dict):
         return {"error": "Weather is unavailable."}
+    current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+    summary = summarize_night(_hourly_samples(payload), lat, lon)
+    summary.update(
+        {
+            "cloud_cover": current.get("cloud_cover"),
+            "precipitation": current.get("precipitation"),
+            "wind_speed": current.get("wind_speed_10m"),
+            "wind_gust": current.get("wind_gusts_10m"),
+            "temperature": current.get("temperature_2m"),
+            "humidity": current.get("relative_humidity_2m"),
+            "dew_point": current.get("dew_point_2m"),
+            "time": current.get("time") or "",
+            "source": "Open-Meteo",
+        }
+    )
+    return summary
+
+
+def _hourly_samples(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    hourly = payload.get("hourly") if isinstance(payload.get("hourly"), dict) else {}
+    stamps = hourly.get("time") if isinstance(hourly.get("time"), list) else []
+    offset = int(payload.get("utc_offset_seconds") or 0)
+    zone = timezone(timedelta(seconds=offset))
+    samples = []
+    for index, stamp in enumerate(stamps):
+        try:
+            local = datetime.fromisoformat(str(stamp)).replace(tzinfo=zone)
+        except ValueError:
+            continue
+        samples.append(
+            {
+                "time": local.astimezone(timezone.utc),
+                "label": local.strftime("%H:%M"),
+                "end": (local + timedelta(hours=1)).strftime("%H:%M"),
+                "cloud": _at(hourly.get("cloud_cover"), index),
+                "temp": _at(hourly.get("temperature_2m"), index),
+                "dew": _at(hourly.get("dew_point_2m"), index),
+                "humidity": _at(hourly.get("relative_humidity_2m"), index),
+                "wind": _at(hourly.get("wind_speed_10m"), index),
+                "gust": _at(hourly.get("wind_gusts_10m"), index),
+            }
+        )
+    return samples
+
+
+def _at(values: Any, index: int) -> float | None:
+    if not isinstance(values, list) or index >= len(values):
+        return None
+    return _float(values[index])
+
+
+def summarize_night(samples: list[dict[str, Any]], lat: float, lon: float, moment: datetime | None = None) -> dict[str, Any]:
+    """Cloud, the clearest stretch, and dew risk for the next dark hours."""
+    moment = moment or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    upcoming = [sample for sample in samples if sample["time"] >= moment - timedelta(minutes=30)]
+    dark = [sample for sample in upcoming if sun_altitude(lat, lon, sample["time"]) <= -12]
+    run = _first_run(dark)
+    if len(run) < 2:
+        run = _first_run([sample for sample in upcoming if sun_altitude(lat, lon, sample["time"]) <= -6])
+    if len(run) < 2:
+        return {"hours": [], "window": "", "low": None, "dew_risk": "", "note": "The sky does not get dark in the next two days."}
+    run = run[:14]
+    clearest = _clearest(run)
+    temps = [sample["temp"] for sample in run if sample.get("temp") is not None]
     return {
-        "cloud_cover": current.get("cloud_cover"),
-        "precipitation": current.get("precipitation"),
-        "wind_speed": current.get("wind_speed_10m"),
-        "time": current.get("time") or "",
+        "hours": [{"label": sample["label"], "cloud": sample.get("cloud")} for sample in run],
+        "window": f"{clearest[0]['label']}–{clearest[-1]['end']}",
+        "low": None if not temps else round(min(temps), 1),
+        "dew_risk": _dew_risk(run),
+        "note": "",
     }
+
+
+def _first_run(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not samples:
+        return []
+    run = [samples[0]]
+    for sample in samples[1:]:
+        if sample["time"] - run[-1]["time"] > timedelta(hours=1, minutes=5):
+            break
+        run.append(sample)
+    return run
+
+
+def _clearest(hours: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best_key: tuple[Any, ...] | None = None
+    best = hours
+    for start in range(len(hours)):
+        for end in range(start, len(hours)):
+            segment = hours[start : end + 1]
+            clouds = [sample["cloud"] for sample in segment if sample.get("cloud") is not None]
+            if not clouds:
+                continue
+            average = sum(clouds) / len(clouds)
+            clear = average <= 40
+            key = (1 if clear else 0, len(segment) if clear else 0, -average, len(segment))
+            if best_key is None or key > best_key:
+                best_key = key
+                best = segment
+    return best
+
+
+def _dew_risk(hours: list[dict[str, Any]]) -> str:
+    gaps = [
+        float(sample["temp"]) - float(sample["dew"])
+        for sample in hours
+        if sample.get("temp") is not None and sample.get("dew") is not None
+    ]
+    if not gaps:
+        return ""
+    gap = min(gaps)
+    if gap <= 1.5:
+        return "High"
+    if gap <= 3.5:
+        return "Moderate"
+    return "Low"
