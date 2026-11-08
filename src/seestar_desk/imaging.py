@@ -263,9 +263,10 @@ def _bayer_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, ma
         sy = min(height - 2, y * step)
         for x in range(out_w):
             sx = min(width - 2, x * step)
-            red = pixels[sy * width + sx]
-            green = (pixels[sy * width + sx + 1] + pixels[(sy + 1) * width + sx]) // 2
-            blue = pixels[(sy + 1) * width + sx + 1]
+            # Seestar previews are GRBG: green, red on the even row, then blue, green.
+            green = (pixels[sy * width + sx] + pixels[(sy + 1) * width + sx + 1]) // 2
+            red = pixels[sy * width + sx + 1]
+            blue = pixels[(sy + 1) * width + sx]
             raw[cursor] = _scale(red, black, white)
             raw[cursor + 1] = _scale(green, black, white)
             raw[cursor + 2] = _scale(blue, black, white)

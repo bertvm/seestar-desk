@@ -255,6 +255,7 @@ class ScopeSession:
             "get_disk_volume",
             "get_view_state",
             "get_focuser_position",
+            "get_camera_info",
             "pi_station_state",
             "get_user_location",
             "pi_get_time",
@@ -407,6 +408,20 @@ class ScopeSession:
                 await current.stop()
                 self._streams.pop(camera, None)
             return
+        if (
+            self.state.get("camera") == camera
+            and current
+            and current.running
+            and time.time() - self._frame_at.get(camera, 0) < 2
+        ):
+            return
+        previous = self.state.get("camera")
+        self.state["camera"] = camera
+        other = self._streams.pop("tele" if camera == "wide" else "wide", None)
+        if other:
+            await other.stop()
+        if camera == "wide" or previous == "wide":
+            await self._engage_camera(camera)
         if current and current.running:
             if time.time() - self._frame_at.get(camera, 0) < 2:
                 return
@@ -426,6 +441,31 @@ class ScopeSession:
             raise
         self.state["live_error"] = ""
 
+    async def _engage_camera(self, camera: str) -> None:
+        """Open the telephoto or wide-angle sensor where the telescope is already pointing.
+
+        Naming the exposure stage does not stop it on this firmware, and a camera
+        change is ignored while that exposure is open. An empty stop does end it.
+        The wide lens is the second sensor, selected on the new view.
+        """
+        try:
+            await self.command("iscope_stop_view", {})
+        except ScopeError as exc:
+            if not _unsupported(exc):
+                self.state["live_error"] = str(exc)
+        await asyncio.sleep(0.4)
+        params: dict[str, Any] = {"mode": "star", "target_name": "Preview"}
+        if camera == "wide":
+            params["selected_cam"] = "SecondView"
+        try:
+            await self.command("iscope_start_view", params)
+        except ScopeError as exc:
+            self.state["live_error"] = str(exc)
+            return
+        self.state["last_error"] = ""
+        self.state["live_error"] = ""
+        self._preview_at = time.time()
+
     async def _preview_for_stream(self) -> None:
         await self._ensure_preview(force=True)
 
@@ -439,13 +479,19 @@ class ScopeSession:
         view_state = str((self.state.get("view") or {}).get("state") or "")
         if stage == "Stack" or stage == "RTSP" or (stage == "AutoGoto" and view_state == "working"):
             return
+        # The wide sensor reports its view as Sleep while it is exposing.
+        if view_state == "working" and stage not in {"", "none", "ContinuousExposure"}:
+            return
         if stage == "ContinuousExposure" and (not force or time.time() - self._preview_at < 4):
             return
         self._preview_at = time.time()
-        await self.command(
-            "iscope_start_view",
-            {"mode": self.state.get("mode") or "star", "target_name": self.state.get("target") or "Preview"},
-        )
+        params: dict[str, Any] = {
+            "mode": self.state.get("mode") or "star",
+            "target_name": self.state.get("target") or "Preview",
+        }
+        if self.state.get("camera") == "wide":
+            params["selected_cam"] = "SecondView"
+        await self.command("iscope_start_view", params)
 
     async def start_video(self, mode: str, minutes: float | None) -> dict[str, Any]:
         mode = mode if mode in {"planet", "moon", "scenery"} else "planet"
@@ -620,19 +666,20 @@ class ScopeSession:
             raise
 
     async def _poll(self) -> None:
-        methods = ("scope_get_equ_coord", "scope_get_horiz_coord", "get_view_state", "get_device_state")
+        others = ("scope_get_equ_coord", "scope_get_horiz_coord", "get_view_state")
         index = 0
         try:
             while self.connected:
                 await asyncio.sleep(2.5)
                 if not self.connected:
                     break
-                method = methods[index % len(methods)]
-                index += 1
-                try:
-                    await self.command(method, timeout=4)
-                except ScopeError:
-                    continue
+                # The level and compass live in the device state, so read that every pass.
+                for method in ("get_device_state", others[index % len(others)]):
+                    index += 1 if method != "get_device_state" else 0
+                    try:
+                        await self.command(method, timeout=4)
+                    except ScopeError:
+                        continue
                 try:
                     await self.night.guard_exposure()
                 except ScopeError:
@@ -667,6 +714,10 @@ class ScopeSession:
             text = _clock_text(result)
             if text:
                 self.state["clock"] = text
+        elif method == "get_camera_info" and isinstance(result, dict):
+            pattern = result.get("debayer_pattern")
+            if pattern:
+                self.state["debayer"] = str(pattern)
         elif method == "get_setting" and isinstance(result, dict):
             self.state["settings"] = result
         elif method == "get_view_state":
@@ -766,6 +817,7 @@ class ImageClient:
         self._next_id = 1
         self._out: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self._retry_stream = False
+        self._saw_frame = False
 
     async def request(self, method: str, params: Any = None) -> None:
         await self._out.put((method, params))
@@ -815,7 +867,7 @@ class ImageClient:
                 if now - last_beat > 4:
                     await self._send("test_connection")
                     last_beat = now
-                if now - last_pull > 3:
+                if now - last_pull > 3 and not self._saw_frame:
                     await self._send("get_current_img")
                     last_pull = now
                 if self._retry_stream:
@@ -909,12 +961,13 @@ class ImageClient:
                     if self.on_need_preview:
                         await self.on_need_preview()
                     self._retry_stream = True
-                elif note and lowered not in {"done", "ok", "server connected!"} and "unknown method" not in lowered:
+                elif note and not _quiet_image_note(lowered):
                     if self.on_status:
                         await self.on_status(note)
                 continue
             if not jpeg:
                 continue
+            self._saw_frame = True
             role = "stack" if item.img_type in {JPEG, RAW} else self.camera
             await self.on_jpeg(
                 role,
@@ -1045,6 +1098,13 @@ def response_error(message: dict[str, Any]) -> str | None:
         detail = message.get("message") or message.get("result") or "command failed"
         return f"{code}: {detail}"
     return None
+
+
+def _quiet_image_note(text: str) -> bool:
+    """Status text from the image port that is not a problem to show."""
+    if text in {"done", "ok", "server connected!"} or "unknown met" in text or "unknown moth" in text:
+        return True
+    return "no image" in text
 
 
 def _unsupported(exc: ScopeError) -> bool:
@@ -1238,7 +1298,9 @@ def _absorb_device(state: dict[str, Any], result: Any) -> None:
         state["level"] = level
     heading = _sensor_data(result.get("compass_sensor"))
     if heading and isinstance(heading.get("direction"), (int, float)) and not isinstance(heading.get("direction"), bool):
-        state["heading"] = heading["direction"]
+        # The sensor's zero is 90° clockwise from the direction the scope points.
+        # Facing true north reports about 90°.
+        state["heading"] = (float(heading["direction"]) - 90.0) % 360.0
     if "location_lon_lat" in result:
         _absorb_location(state, result["location_lon_lat"])
     storage = result.get("storage") if isinstance(result.get("storage"), dict) else None

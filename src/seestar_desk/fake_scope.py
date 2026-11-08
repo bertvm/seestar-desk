@@ -18,6 +18,14 @@ from seestar_desk.session import GUEST_OK
 READ_ONLY = GUEST_OK | {"set_user_location", "pi_set_time", "pi_output_set2"}
 
 
+def _camera_id(value: Any) -> int:
+    if value in {"SecondView", "wide", 1, "1"}:
+        return 1
+    if value in {"View", "tele", 0, "0"}:
+        return 0
+    return int(value)
+
+
 class FakeScope:
     def __init__(
         self,
@@ -43,6 +51,7 @@ class FakeScope:
         self.equatorial = False
         self.parked = False
         self.stacking = False
+        self.cam_id = 0
         self.settings: dict[str, Any] = {
             "exp_ms": {"stack_l": 10000, "continuous": 10000},
             "stack_dither": {"pix": 50, "interval": 5, "enable": False},
@@ -231,6 +240,10 @@ class FakeScope:
         if method == "set_setting" and isinstance(params, dict):
             if "master_cli" in params:
                 self.master = bool(params["master_cli"])
+            if "selected_cam" in params:
+                self.cam_id = _camera_id(params["selected_cam"])
+            if "wide_cam" in params:
+                self.cam_id = 1 if params["wide_cam"] else 0
             stored = {key: value for key, value in params.items() if key != "verify"}
             self.settings.update(stored)
             return {"master_cli": self.master}
@@ -249,6 +262,7 @@ class FakeScope:
                 "location_lon_lat": [6.1114, 52.3372],
                 "balance_sensor": {"code": 0, "data": {"x": 0.02, "y": -0.012, "z": 0.999, "angle": 1.32}},
                 "compass_sensor": {"code": 0, "data": {"direction": 12.4}},
+                "setting": {"wide_cam": self.cam_id == 1},
             }
         if method in {"scope_get_equ_coord", "scope_get_ra_dec"}:
             return {"ra": self.ra, "dec": self.dec}
@@ -257,7 +271,12 @@ class FakeScope:
         if method == "get_disk_volume":
             return {"free_mb": 42000, "total_mb": 58000}
         if method == "get_view_state":
-            return {"mode": "star", "stage": "Stack" if self.stacking else "none", "target_name": "M 42"}
+            return {
+                "mode": "star",
+                "stage": "Stack" if self.stacking else "ContinuousExposure",
+                "target_name": "M 42",
+                "cam_id": self.cam_id,
+            }
         if method == "get_focuser_position":
             return self.focus
         if method == "get_wheel_position":
@@ -311,6 +330,11 @@ class FakeScope:
             return "ok"
         if method == "iscope_stop_view":
             self.stacking = False
+            return "ok"
+        if method == "iscope_start_view" and isinstance(params, dict) and (
+            "cam_id" in params or "selected_cam" in params
+        ):
+            self.cam_id = _camera_id(params.get("selected_cam", params.get("cam_id")))
             return "ok"
         if method == "scope_park":
             self.parked = True

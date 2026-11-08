@@ -418,9 +418,11 @@ function paintMeters() {
     clearFrame("#stage", "Parked");
     clearFrame("#stack-stage", "Parked");
   } else {
-    showFrame("#stage", liveSeq || stackSeq, liveSeq ? state.camera : "stack");
+    if (liveSeq) showFrame("#stage", liveSeq, state.camera);
+    else prepareLiveStage();
     showFrame("#stack-stage", stackSeq, "stack");
   }
+  markCameras();
   const plot = document.querySelector("#pa-plot .dot");
   const align = snap.align || {};
   const ax = Number(align.x ?? align.eq_offset_az);
@@ -476,7 +478,7 @@ function clearFrame(selector, text) {
   const empty = document.querySelector(`${selector}-empty`);
   if (stage) {
     stage.removeAttribute("src");
-    stage.dataset.seq = "";
+    stage.dataset.token = "";
   }
   if (empty) {
     empty.hidden = false;
@@ -486,11 +488,35 @@ function clearFrame(selector, text) {
 
 function showFrame(selector, seq, camera) {
   const stage = document.querySelector(selector);
-  if (!stage || !seq || stage.dataset.seq === String(seq)) return;
-  stage.dataset.seq = String(seq);
+  const token = `${camera}:${seq}`;
+  if (!stage || !seq || stage.dataset.token === token) return;
+  stage.dataset.token = token;
   stage.src = `${scopePath("/frame.jpg")}?camera=${camera}&seq=${seq}`;
   const empty = document.querySelector(`${selector}-empty`);
   if (empty) empty.hidden = true;
+}
+
+function markCameras() {
+  document.querySelectorAll("[data-camera]").forEach((button) => {
+    const on = button.dataset.camera === (state.camera || "tele");
+    button.classList.toggle("primary", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const label = document.querySelector("[data-live-camera]");
+  if (label) label.textContent = state.camera === "wide" ? "Wide angle" : "Telephoto";
+}
+
+function prepareLiveStage() {
+  const stage = document.querySelector("#stage");
+  const empty = document.querySelector("#stage-empty");
+  if (stage && stage.dataset.token && !stage.dataset.token.startsWith(`${state.camera}:`)) {
+    stage.removeAttribute("src");
+    stage.dataset.token = "";
+  }
+  if (empty && (!stage || !stage.getAttribute("src"))) {
+    empty.hidden = false;
+    empty.textContent = state.camera === "wide" ? "Waiting for the wide angle…" : "Opening the telephoto…";
+  }
 }
 
 function activityText(snap) {
@@ -668,25 +694,31 @@ function levelVector(snap) {
   const z = Number(sensor.z);
   const reported = Number(sensor.angle);
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-    return Number.isFinite(reported) ? { x: 0, y: 0, angle: reported } : null;
+    return Number.isFinite(reported) ? { x: 0, y: 0, angle: reported, wedge: 90 - reported } : null;
   }
   const tiltX = Math.atan2(x, z) * 180 / Math.PI;
   const tiltY = Math.atan2(y, z) * 180 / Math.PI;
-  const angle = Number.isFinite(reported) ? reported : Math.hypot(tiltX, tiltY);
-  return { x: tiltX, y: tiltY, angle };
+  const fromVector = Math.atan2(Math.hypot(x, y), Math.abs(z)) * 180 / Math.PI;
+  const angle = Number.isFinite(reported) ? reported : fromVector;
+  // The sensor measures from vertical. A wedge set to the latitude is the complement of that angle.
+  const wedge = 90 - angle;
+  return { x: tiltX, y: tiltY, angle, wedge };
 }
 
 function paintLevel(snap) {
   const bubble = document.querySelector("#level-bubble .dot");
   const angle = document.querySelector('[data-field="level-angle"]');
   const note = document.querySelector('[data-field="level-note"]');
-  const tilt = document.querySelector('[data-field="base-tilt"]');
+  const base = document.querySelector('[data-field="base-tilt"]');
   const target = document.querySelector('[data-field="wedge-target"]');
   const point = document.querySelector('[data-field="wedge-point"]');
   const status = document.querySelector('[data-field="eq-status"]');
   const reading = levelVector(snap);
-  const latitude = Number(snap.latitude);
-  const miss = reading && snap.equatorial && Number.isFinite(latitude) ? Math.abs(reading.angle - Math.abs(latitude)) : reading ? reading.angle : 99;
+  const here = placeNow(snap);
+  const latitude = here ? Number(here.latitude) : NaN;
+  const shown = reading ? (snap.equatorial ? reading.wedge : reading.angle) : null;
+  const wedge = reading ? reading.wedge : null;
+  const miss = shown !== null && snap.equatorial && Number.isFinite(latitude) ? Math.abs(shown - Math.abs(latitude)) : shown !== null ? shown : 99;
   if (bubble) {
     const scale = 5;
     const dx = reading ? Math.max(-1, Math.min(1, reading.x / scale)) : 0;
@@ -695,12 +727,12 @@ function paintLevel(snap) {
     bubble.style.top = `${50 - dy * 42}%`;
   }
   if (angle) {
-    angle.textContent = reading ? `${reading.angle.toFixed(1)}°` : "—";
-    angle.classList.toggle("good", Boolean(reading && miss < 0.5));
-    angle.classList.toggle("warn", Boolean(reading && miss >= 0.5 && miss < (snap.equatorial ? 2 : 1.5)));
-    angle.classList.toggle("bad", Boolean(reading && miss >= (snap.equatorial ? 2 : 1.5)));
+    angle.textContent = shown !== null ? `${shown.toFixed(1)}°` : "—";
+    angle.classList.toggle("good", Boolean(shown !== null && miss < 0.5));
+    angle.classList.toggle("warn", Boolean(shown !== null && miss >= 0.5 && miss < (snap.equatorial ? 2 : 1.5)));
+    angle.classList.toggle("bad", Boolean(shown !== null && miss >= (snap.equatorial ? 2 : 1.5)));
   }
-  if (tilt) tilt.textContent = reading ? `${reading.angle.toFixed(1)}°` : "—";
+  if (base) base.textContent = shown !== null ? `${shown.toFixed(1)}°` : "—";
   if (target) target.textContent = Number.isFinite(latitude) ? `${Math.abs(latitude).toFixed(1)}°` : "—";
   if (point) {
     const pole = Number.isFinite(latitude) && latitude < 0 ? "south" : "north";
@@ -709,17 +741,183 @@ function paintLevel(snap) {
   if (note) {
     if (!reading) note.textContent = "The level appears after the telescope connects. The scale is 5° at the edge.";
     else if (snap.equatorial && Number.isFinite(latitude)) {
-      note.textContent = `The base is ${reading.angle.toFixed(1)}° from level. This place needs the wedge near ${Math.abs(latitude).toFixed(1)}°.`;
-    } else if (reading.angle < 0.5) note.textContent = "Level. The dot is inside the small circle.";
-    else if (reading.angle < 1.5) note.textContent = "Close. A small tweak to a tripod leg would help. The scale is 5° at the edge.";
+      note.textContent = `The wedge is ${shown.toFixed(1)}° from level. This place needs it near ${Math.abs(latitude).toFixed(1)}°.`;
+    } else if (shown < 0.5) note.textContent = "Level. The dot is inside the small circle.";
+    else if (shown < 1.5) note.textContent = "Close. A small tweak to a tripod leg would help. The scale is 5° at the edge.";
     else note.textContent = "Adjust the tripod legs until the dot sits in the small circle. The scale is 5° at the edge.";
   }
   if (status) {
     if (!snap.connected) status.textContent = "Connect the telescope to read the mount.";
     else if (!snap.equatorial) status.textContent = "Alt-az. Put the scope on a wedge before switching.";
-    else if (reading && Number.isFinite(latitude) && Math.abs(reading.angle - Math.abs(latitude)) <= 2) status.textContent = "Equatorial. The wedge tilt matches this place.";
+    else if (shown !== null && Number.isFinite(latitude) && Math.abs(shown - Math.abs(latitude)) <= 2) status.textContent = "Equatorial. The wedge tilt matches this place.";
     else status.textContent = "Equatorial. Check the wedge angle against the latitude.";
   }
+  paintEquatorial(snap, wedge, latitude);
+}
+
+function paintEquatorial(snap, wedge, latitude) {
+  const now = document.querySelector('[data-field="eq-now"]');
+  const need = document.querySelector('[data-field="eq-need"]');
+  const guide = document.querySelector('[data-field="eq-guide"]');
+  const needed = Number.isFinite(latitude) ? Math.abs(latitude) : null;
+  if (need) need.textContent = needed === null ? "—" : `${needed.toFixed(1)}°`;
+  const gap = wedge !== null && needed !== null ? Math.abs(wedge - needed) : null;
+  if (now) {
+    now.textContent = wedge === null ? "—" : `${wedge.toFixed(1)}°`;
+    now.classList.toggle("good", gap !== null && gap < 0.5);
+    now.classList.toggle("warn", gap !== null && gap >= 0.5 && gap < 2);
+    now.classList.toggle("bad", gap !== null && gap >= 2);
+  }
+  const heading = Number(snap.heading);
+  if (guide) guide.textContent = equatorialGuide(wedge, needed, latitude, heading);
+  drawEqDome(wedge, needed, latitude, heading, gap);
+}
+
+function drawEqDome(wedge, needed, latitude, heading, gap) {
+  const canvas = document.querySelector("#eq-dome");
+  if (!canvas) return;
+  const width = canvas.clientWidth || 520;
+  const height = Math.round(Math.min(width, 520));
+  canvas.style.height = `${height}px`;
+  const pixel = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(width * pixel);
+  canvas.height = Math.round(height * pixel);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(pixel, 0, 0, pixel, 0, 0);
+  const style = getComputedStyle(document.documentElement);
+  const color = (name, fallback) => style.getPropertyValue(name).trim() || fallback;
+  const accent = color("--accent", "#e0b15a");
+  const text = color("--text", "#e8edf4");
+  const muted = color("--muted", "#93a0b4");
+  const line = color("--line", "#2a3444");
+  const raise = color("--bg-raise", "#151b24");
+  const sink = color("--bg-sink", "#090c11");
+  const dot = gap === null ? text : gap < 0.5 ? color("--good", "#8dceab") : gap < 2 ? color("--warn", "#e0a15a") : color("--bad", "#e58989");
+  const cx = width * 0.5;
+  const cy = height * 0.46;
+  const radius = Math.min(width, height) * 0.36;
+  // Inside the dome, looking up. North is at the top and east is on the left.
+  const at = (az, alt) => {
+    const reach = (1 - Math.max(0, Math.min(90, alt)) / 90) * radius;
+    const a = ((az % 360) + 360) % 360 * Math.PI / 180;
+    return { x: cx - Math.sin(a) * reach, y: cy - Math.cos(a) * reach };
+  };
+  const sky = ctx.createRadialGradient(cx, cy, radius * 0.08, cx, cy, radius);
+  sky.addColorStop(0, raise);
+  sky.addColorStop(0.72, sink);
+  sky.addColorStop(1, sink);
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = sky;
+  ctx.fill();
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+  glow.addColorStop(0, accent);
+  glow.addColorStop(1, "transparent");
+  ctx.save();
+  ctx.globalAlpha = 0.16;
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = line;
+  ctx.lineWidth = 1.25;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.globalAlpha = 0.55;
+  [30, 60].forEach((alt) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, (1 - alt / 90) * radius, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(at(180, 0).x, at(180, 0).y);
+  ctx.lineTo(at(0, 0).x, at(0, 0).y);
+  ctx.moveTo(at(270, 0).x, at(270, 0).y);
+  ctx.lineTo(at(90, 0).x, at(90, 0).y);
+  ctx.stroke();
+  ctx.restore();
+  ctx.font = "600 14px Inter, Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  [["N", 0, accent], ["E", 90, muted], ["S", 180, muted], ["W", 270, muted]].forEach(([label, az, ink]) => {
+    const rim = at(az, 0);
+    const dx = rim.x - cx;
+    const dy = rim.y - cy;
+    const length = Math.hypot(dx, dy) || 1;
+    ctx.fillStyle = ink;
+    ctx.fillText(label, rim.x + dx / length * 16, rim.y + dy / length * 16);
+  });
+  const south = Number.isFinite(latitude) && latitude < 0;
+  const targetAz = south ? 180 : 0;
+  const knownHeading = Number.isFinite(heading);
+  if (needed !== null && wedge !== null && knownHeading) {
+    const target = at(targetAz, needed);
+    const actual = at(heading, wedge);
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(actual.x, actual.y);
+    ctx.lineTo(target.x, target.y);
+    ctx.strokeStyle = muted;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if (needed !== null) {
+    const target = at(targetAz, needed);
+    ctx.beginPath();
+    ctx.arc(target.x, target.y, 8, 0, Math.PI * 2);
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (wedge !== null) {
+    const actual = at(knownHeading ? heading : targetAz, wedge);
+    ctx.beginPath();
+    ctx.arc(actual.x, actual.y, 6.5, 0, Math.PI * 2);
+    ctx.fillStyle = dot;
+    ctx.fill();
+  }
+  ctx.font = "600 15px Inter, Segoe UI, sans-serif";
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  ctx.fillStyle = text;
+  ctx.fillText(wedge === null ? "Current —" : `Current ${wedge.toFixed(1)}°`, 14, height - 14);
+  ctx.textAlign = "right";
+  ctx.fillStyle = muted;
+  ctx.font = "14px Inter, Segoe UI, sans-serif";
+  ctx.fillText(needed === null ? "Needed —" : `Needed ${needed.toFixed(1)}°`, width - 14, height - 14);
+}
+
+function equatorialGuide(wedge, needed, latitude, heading) {
+  const south = Number.isFinite(latitude) && latitude < 0;
+  const pole = south ? "south" : "north";
+  const mark = south ? "S" : "N";
+  const parts = [];
+  if (wedge === null) parts.push("The current angle appears when the telescope is connected.");
+  else if (needed === null) parts.push(`The wedge is ${wedge.toFixed(1)}°. Save a place in Settings for the angle this location needs.`);
+  else if (Math.abs(wedge - needed) < 0.5) parts.push(`The wedge is ${wedge.toFixed(1)}°, which matches this place.`);
+  else if (wedge > needed) parts.push(`The wedge is ${wedge.toFixed(1)}°. This place needs ${needed.toFixed(1)}°, so lower it ${(wedge - needed).toFixed(1)}°.`);
+  else parts.push(`The wedge is ${wedge.toFixed(1)}°. This place needs ${needed.toFixed(1)}°, so raise it ${(needed - wedge).toFixed(1)}°.`);
+  if (!Number.isFinite(heading)) parts.push(`You are looking up through the dome. True ${pole} is ${south ? "at the bottom" : "at the top"}, and east is on the left.`);
+  else {
+    const target = south ? 180 : 0;
+    let delta = ((heading % 360) + 360) % 360 - target;
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+    if (Math.abs(delta) < 3) parts.push(`The dot is on true ${pole}.`);
+    else {
+      const side = delta > 0 ? "east" : "west";
+      parts.push(`The wedge points ${Math.abs(delta).toFixed(0)}° ${side} of true ${pole}. Turn it until the dot meets ${mark}. East is on the left, as in the sky.`);
+    }
+  }
+  return parts.join(" ");
 }
 
 function paintPolar(snap) {
@@ -1031,11 +1229,15 @@ function renderSky() {
 function renderPicture() {
   return `
     <div class="page-head">
-      <h1>Picture</h1>
+      <div>
+        <h1>Picture</h1>
+        <div class="cam-switch" role="group" aria-label="Live view">
+          <button id="live-tele" data-camera="tele" class="${state.camera === "wide" ? "" : "primary"}" aria-pressed="${state.camera === "wide" ? "false" : "true"}">Telephoto</button>
+          <button id="live-wide" data-camera="wide" class="${state.camera === "wide" ? "primary" : ""}" aria-pressed="${state.camera === "wide" ? "true" : "false"}">Wide angle</button>
+        </div>
+      </div>
       <div class="actions">
         <button id="layout">${state.layout === "theater" ? "Show controls" : "Theater"}</button>
-        <button id="live-tele">Telephoto</button>
-        <button id="live-wide">Wide camera</button>
         <button id="live-stop">Stop live view</button>
         <button id="play-tv">Play on TV</button>
       </div>
@@ -1046,8 +1248,8 @@ function renderPicture() {
         <div class="stages">
           <div class="stage">
             <img id="stage" alt="">
-            <div class="placeholder" id="stage-empty">Opening the camera…</div>
-            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Live · <span data-field="target"></span></span></div>
+            <div class="placeholder" id="stage-empty">Opening the telephoto…</div>
+            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem"><span data-live-camera>${state.camera === "wide" ? "Wide angle" : "Telephoto"}</span> · <span data-field="target"></span></span></div>
           </div>
           <div class="stage">
             <img id="stack-stage" alt="Latest stacked frame">
@@ -1141,6 +1343,29 @@ function renderAlign() {
     <div class="page-head"><h1>Level, mount and alignment</h1></div>
     ${banner()}
     <div class="align-board">
+      <section class="card eq-setup">
+        <h2>Equatorial setup</h2>
+        <div class="eq-screen">
+          <canvas id="eq-dome" width="640" height="440" aria-label="Dome with true north and the current wedge angle"></canvas>
+          <div class="eq-angles">
+            <div>
+              <span class="muted">Current angle</span>
+              <p class="level-readout" data-field="eq-now">—</p>
+            </div>
+            <div>
+              <span class="muted">Needed here</span>
+              <p class="level-readout needed" data-field="eq-need">—</p>
+            </div>
+            <p class="muted eq-guide" data-field="eq-guide">Look up through the dome. Set the wedge to the angle for this place, then turn it until the dot meets true north. East is on the left.</p>
+          </div>
+        </div>
+        <label class="row"><input id="eq-ready" type="checkbox"${ready ? " checked" : ""}> The scope is on a wedge, set to this latitude, facing the pole, and the arm can swing freely</label>
+        <div class="actions">
+          <button id="to-eq"${ready ? "" : " disabled"}>Switch to equatorial</button>
+          <button id="to-az">Switch to alt-az</button>
+        </div>
+        <p class="muted">Switching mode levels the arm and then parks. That is how the telescope changes between alt-az and equatorial.</p>
+      </section>
       <section class="card level-card">
         <h2>Tripod level</h2>
         <div class="bubble" id="level-bubble" title="The scale is 5 degrees at the edge"><span class="dot"></span></div>
@@ -1161,21 +1386,6 @@ function renderAlign() {
             <button id="open-arm">Open the arm</button>
             <button class="danger" id="park">Park and fold</button>
           </div>
-        </section>
-        <section class="card">
-          <h2>Equatorial setup</h2>
-          <div class="facts">
-            <div class="fact"><span>Set the wedge to</span><b data-field="wedge-target">—</b></div>
-            <div class="fact"><span>Base tilt from level</span><b data-field="base-tilt">—</b></div>
-            <div class="fact"><span>Point the wedge</span><b data-field="wedge-point">—</b></div>
-            <div class="fact"><span>Status</span><b data-field="eq-status">—</b></div>
-          </div>
-          <label class="row"><input id="eq-ready" type="checkbox"${ready ? " checked" : ""}> The scope is on a wedge, set to this latitude, facing the pole, and the arm can swing freely</label>
-          <div class="actions">
-            <button id="to-eq"${ready ? "" : " disabled"}>Switch to equatorial</button>
-            <button id="to-az">Switch to alt-az</button>
-          </div>
-          <p class="muted">Switching mode levels the arm and then parks. That is how the telescope changes between alt-az and equatorial.</p>
         </section>
         <section class="card">
           <h2>Align the wedge to the pole</h2>
@@ -1455,11 +1665,12 @@ function readSkyPick(engine) {
 function syncSkyObserver() {
   const engine = state.skyEngine;
   if (!engine || !engine.observer) return;
-  const here = placeNow(state.snap || {});
+  const snap = state.snap;
+  const here = placeNow(snap || {});
   if (!here) return;
   engine.observer.latitude = here.latitude * Math.PI / 180;
   engine.observer.longitude = here.longitude * Math.PI / 180;
-  if (engine.date2MJD) engine.observer.utc = engine.date2MJD(skyDate(snap.clock));
+  if (engine.date2MJD) engine.observer.utc = engine.date2MJD(skyDate(snap && snap.clock));
 }
 
 function prepareSky(engine) {
@@ -2089,10 +2300,15 @@ function playOnTv() {
 }
 
 function startLive(camera) {
-  state.camera = camera;
+  const next = camera === "wide" ? "wide" : "tele";
+  const changed = state.camera !== next;
+  state.camera = next;
+  markCameras();
+  if (changed) prepareLiveStage();
   if (state.snap && state.snap.parked) return;
   return guard(async () => {
-    await api(scopePath("/live"), { method: "POST", body: JSON.stringify({ camera, enabled: true }) });
+    await api(scopePath("/live"), { method: "POST", body: JSON.stringify({ camera: next, enabled: true }) });
+    paintMeters();
   });
 }
 

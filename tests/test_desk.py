@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import struct
 import unittest
@@ -56,7 +57,7 @@ class ReadingTests(unittest.TestCase):
             },
         )
         self.assertEqual(state["level"]["angle"], 1.3)
-        self.assertEqual(state["heading"], 184.2)
+        self.assertAlmostEqual(state["heading"], 94.2)
         located: dict = {}
         _absorb_location(located, [5.12, 52.09])
         self.assertEqual(located["longitude"], 5.12)
@@ -121,6 +122,16 @@ class ImageTests(unittest.TestCase):
         frame = build_frame(pixels.tobytes(), PREVIEW, 4, 4, data_type=2)
         parsed = FrameParser().feed(frame)[0][1]
         self.assertTrue(to_jpeg(parsed).startswith(b"\xff\xd8"))
+
+    def test_preview_treats_the_pattern_as_grbg(self) -> None:
+        from PIL import Image
+
+        pixels = array("H", [1000, 8000, 100, 1000])
+        frame = build_frame(pixels.tobytes(), PREVIEW, 2, 2, data_type=2)
+        parsed = FrameParser().feed(frame)[0][1]
+        image = Image.open(io.BytesIO(to_jpeg(parsed)))
+        red, _green, blue = image.getpixel((0, 0))[:3]
+        self.assertGreater(red, blue)
 
     def test_display_frame_keeps_the_long_edge(self) -> None:
         from seestar_desk.imaging import preview_and_display
@@ -312,6 +323,13 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.05)
         self.assertTrue(self.session.frames.get("stack", b"").startswith(b"\xff\xd8"))
+        await self.session.live("wide", True)
+        for _ in range(30):
+            if self.session.frames.get("wide"):
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(self.fake.cam_id, 1)
+        self.assertTrue(self.session.frames.get("wide", b"").startswith(b"\xff\xd8"))
 
     async def test_park_stops_the_image_stream(self) -> None:
         await self.session.claim()
