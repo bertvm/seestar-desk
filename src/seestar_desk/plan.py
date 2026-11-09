@@ -92,20 +92,6 @@ class NightPlan:
         self.status["step"] = "stopping"
         self.status["detail"] = "Stopping after the current step."
 
-    async def guard_exposure(self) -> None:
-        """Stop a stack the user started by hand when a safety limit is crossed."""
-        if self.status.get("running"):
-            return
-        phase = str((self.session.state.get("stack") or {}).get("state") or "")
-        if phase not in {"start", "working", "stacking"}:
-            return
-        reasons = self._hard_reasons(self._current_target(), datetime.now(timezone.utc))
-        if not reasons:
-            return
-        self.session.state["stack"]["state"] = "stopped"
-        await self.session.stop("Stack")
-        await self.session._note("Stopped the stack: " + "; ".join(reasons))
-
     async def _run(self) -> None:
         try:
             await self.session.claim()

@@ -742,6 +742,10 @@ button.wide {
   gap: 0.6rem;
 }
 
+.stack-view { min-height: min(72vh, 860px); margin-bottom: 0.8rem; }
+
+.live-view { height: 280px; min-height: 280px; }
+
 .stage .placeholder {
   position: absolute;
   inset: 0;
@@ -936,6 +940,20 @@ button.wide {
 .transfer-grid h3 { margin: 0 0 0.45rem; font-size: 0.95rem; }
 .transfer-list { max-height: 70vh; min-height: 420px; }
 
+.folder-shade {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 1.2rem;
+  background: rgba(5, 8, 12, 0.72);
+}
+.folder-shade[hidden] { display: none; }
+.folder-window { width: min(720px, 100%); max-height: min(80vh, 760px); display: flex; flex-direction: column; }
+.folder-list { min-height: 280px; max-height: 48vh; overflow: auto; }
+.folder-entry { width: 100%; text-align: left; }
+
 .stage .overlay {
   position: absolute;
   top: 0.7rem;
@@ -1063,6 +1081,7 @@ button.wide {
 
 @media (max-width: 860px) {
   .shell, .work, .stages, .scope-card, .scope-card.linked { grid-template-columns: 1fr; }
+  .stack-view { min-height: 62vh; }
   .scope-card.linked .scope-art, .scope-card .actions, .readings { grid-column: auto; grid-row: auto; }
   nav { flex-direction: row; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   .nav-label { display: none; }

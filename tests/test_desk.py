@@ -342,6 +342,7 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.05)
         self.assertTrue(self.session.frames.get("stack", b"").startswith(b"\xff\xd8"))
+        self.session.state["stack"]["state"] = "complete"
         await self.session.live("wide", True)
         for _ in range(30):
             if self.session.frames.get("wide"):
@@ -349,6 +350,46 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
         self.assertEqual(self.fake.cam_id, 1)
         self.assertTrue(self.session.frames.get("wide", b"").startswith(b"\xff\xd8"))
+
+    async def test_a_new_target_clears_the_stacked_picture(self) -> None:
+        await self.session.claim()
+        self.session.state["target"] = "M 42"
+        self.session.frames["stack"] = b"\xff\xd8old"
+        self.session.frame_seq["stack"] = 4
+        self.session.state["stack"] = {"state": "working", "stacked": 9}
+        await self.session.goto(5.6, -5.4, "M 31", "star", False)
+        self.assertEqual(self.session.state["target"], "M 31")
+        self.assertNotIn("stack", self.session.frames)
+        self.assertEqual(self.session.frame_seq["stack"], 0)
+        self.assertEqual(self.session.state["stack"], {})
+        self.session.frames["stack"] = b"\xff\xd8new"
+        self.session.frame_seq["stack"] = 1
+        await self.session.goto(0.7, 41.3, "M 31", "star", False)
+        self.assertEqual(self.session.frames["stack"], b"\xff\xd8new")
+
+    async def test_stack_is_not_stopped_to_open_the_preview(self) -> None:
+        await self.session.claim()
+        self.session.state["camera"] = "wide"
+        await self.session.stack(True, None)
+        methods = [item.get("method") for item in self.fake.received]
+        started = methods.index("iscope_start_stack")
+        self.assertNotIn("iscope_stop_view", methods[started:])
+        self.assertNotIn("iscope_start_view", methods[started:])
+        self.assertTrue(self.fake.stacking)
+        self.assertEqual(self.session.state["stack"]["state"], "working")
+        client = self.session._streams.get("tele")
+        self.assertIsNotNone(client)
+        self.assertFalse(client.preview)
+
+    async def test_dark_library_is_left_running(self) -> None:
+        await self.session.claim()
+        self.session.state["view"] = {"stage": "DarkLibrary", "state": "working"}
+        before = len(self.fake.received)
+        await self.session.live("tele", True)
+        methods = [item.get("method") for item in self.fake.received[before:]]
+        self.assertNotIn("iscope_stop_view", methods)
+        self.assertNotIn("iscope_start_view", methods)
+        self.assertFalse(self.session._streams["tele"].preview)
 
     async def test_park_stops_the_image_stream(self) -> None:
         await self.session.claim()

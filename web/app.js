@@ -12,6 +12,9 @@ const state = {
   gallery: [],
   galleryPick: "",
   downloadDest: "",
+  saveDir: null,
+  dirStack: [],
+  pendingCopy: null,
   galleryEngine: null,
   layout: localStorage.getItem("seestar-layout") || "cards",
   camera: "tele",
@@ -424,7 +427,8 @@ function paintMeters() {
   } else {
     if (liveSeq) showFrame("#stage", liveSeq, state.camera);
     else prepareLiveStage();
-    showFrame("#stack-stage", stackSeq, "stack");
+    if (stackSeq) showFrame("#stack-stage", stackSeq, "stack");
+    else clearFrame("#stack-stage", "The stack appears here");
   }
   markCameras();
   const plot = document.querySelector("#pa-plot .dot");
@@ -524,12 +528,16 @@ function prepareLiveStage() {
 }
 
 function activityText(snap) {
+  const view = snap.view || {};
+  const stage = String(view.stage || "");
+  if (/dark/i.test(stage) && /lib/i.test(stage) && String(view.state || "").toLowerCase() === "working") {
+    return "Building the dark library";
+  }
   const phase = String((snap.stack || {}).state || "");
   if (["start", "working", "stacking"].includes(phase)) {
     return `Taking pictures${snap.target ? " · " + snap.target : ""}`;
   }
   if (snap.parked) return "Parked";
-  const view = snap.view || {};
   if (view.state && !["complete", "cancel", "idle"].includes(String(view.state))) return gotoText(snap);
   return "Ready";
 }
@@ -1247,18 +1255,17 @@ function renderPicture() {
       </div>
     </div>
     ${banner()}
+    <div class="stage stack-view">
+      <img id="stack-stage" alt="Latest stacked frame">
+      <div class="placeholder" id="stack-stage-empty">The stack appears here</div>
+      <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Stack · <span data-field="stack"></span></span></div>
+    </div>
     <div class="work">
       <div>
-        <div class="stages">
-          <div class="stage">
-            <img id="stage" alt="">
-            <div class="placeholder" id="stage-empty">Opening the telephoto…</div>
-            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem"><span data-live-camera>${state.camera === "wide" ? "Wide angle" : "Telephoto"}</span> · <span data-field="target"></span></span></div>
-          </div>
-          <div class="stage">
-            <img id="stack-stage" alt="Latest stacked frame">
-            <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Stack · <span data-field="stack"></span></span></div>
-          </div>
+        <div class="stage live-view">
+          <img id="stage" alt="">
+          <div class="placeholder" id="stage-empty">Opening the telephoto…</div>
+          <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem"><span data-live-camera>${state.camera === "wide" ? "Wide angle" : "Telephoto"}</span> · <span data-field="target"></span></span></div>
         </div>
         <div class="nudge card">
           <div class="pad" id="pad"><span class="n">up</span><span class="e">right</span><span class="s">down</span><span class="w">left</span></div>
@@ -1452,9 +1459,10 @@ function renderAlbum() {
       <div class="transfer-head">
         <div>
           <h2>File transfer</h2>
-          <p class="muted">Copies are saved on this computer${state.downloadDest ? ` in ${escapeHtml(state.downloadDest)}` : ""}.</p>
+          <p class="muted" id="download-dest">${escapeHtml(downloadDestText())}</p>
         </div>
         <div class="actions">
+          <button type="button" id="choose-folder">Choose folder</button>
           <button type="button" id="select-all">Select all files</button>
           <button class="primary" id="copy">Copy selected to this computer</button>
         </div>
@@ -2214,23 +2222,13 @@ function bind() {
   bindClick("#select-all", () => {
     document.querySelectorAll("input[name=file]").forEach((node) => { node.checked = true; });
   });
-  bindClick("#copy", () => guard(async () => {
-    const names = [...document.querySelectorAll("input[name=file]:checked")].map((node) => node.value);
-    const result = await api(scopePath("/download"), { method: "POST", body: JSON.stringify({ folder: state.folder, names }) });
-    const remove = document.querySelector("#delete-after")?.checked;
-    if (remove) {
-      if (!confirm(`Delete ${names.length} file${names.length === 1 ? "" : "s"} from the telescope? This cannot be undone.`)) {
-        toast(`Copied ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} to ${result.dest}`);
-        return;
-      }
-      const removed = await api(scopePath("/files/delete"), { method: "POST", body: JSON.stringify({ folder: state.folder, names }) });
-      toast(`Copied ${result.saved.length} and removed ${removed.removed.length} from the telescope.`);
-      state.files = (await api(`${scopePath("/files")}?folder=${encodeURIComponent(state.folder)}`)).files;
-      render();
-      return;
-    }
-    toast(`Copied ${result.saved.length} file${result.saved.length === 1 ? "" : "s"} to ${result.dest}`);
-  }));
+  bindClick("#choose-folder", () => openFolderWindow(false));
+  bindClick("#copy", () => copySelected());
+  bindClick("#folder-up", () => climbFolder());
+  bindClick("#folder-browse", () => browseFolder());
+  bindClick("#folder-new", () => makeFolder());
+  bindClick("#folder-use", () => useCurrentFolder());
+  bindClick("#folder-cancel", () => closeFolderWindow());
   document.querySelectorAll("[data-theme-choice]").forEach((button) => {
     button.onclick = () => {
       applyTheme(button.dataset.themeChoice);
@@ -2392,27 +2390,106 @@ function post(path, body) {
   });
 }
 
+function castElements() {
+  let plate = document.querySelector("#cast-plate");
+  if (!plate) {
+    plate = document.createElement("canvas");
+    plate.id = "cast-plate";
+    plate.hidden = true;
+    document.body.appendChild(plate);
+  }
+  let video = document.querySelector("#cast-video");
+  if (!video) {
+    video = document.createElement("video");
+    video.id = "cast-video";
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("x-webkit-airplay", "allow");
+    video.setAttribute("airplay", "allow");
+    video.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none";
+    document.body.appendChild(video);
+  }
+  return { plate, video };
+}
+
+function castStackImage() {
+  let image = document.querySelector("#cast-stack");
+  if (!image) {
+    image = document.createElement("img");
+    image.id = "cast-stack";
+    image.alt = "";
+    image.hidden = true;
+    document.body.appendChild(image);
+  }
+  const seq = state.snap && state.snap.frame_seq && state.snap.frame_seq.stack;
+  if (!seq || image.dataset.seq === String(seq)) return image;
+  image.dataset.seq = String(seq);
+  image.src = `${scopePath("/frame.jpg")}?profile=tv&camera=stack&seq=${encodeURIComponent(seq)}`;
+  return image;
+}
+
+function paintCastPlate(plate) {
+  const source = castStackImage();
+  const ready = source && source.complete && source.naturalWidth;
+  const width = ready ? source.naturalWidth : 1920;
+  const height = ready ? source.naturalHeight : 1080;
+  if (plate.width !== width || plate.height !== height) {
+    plate.width = width;
+    plate.height = height;
+  }
+  const context = plate.getContext("2d");
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, width, height);
+  if (ready) context.drawImage(source, 0, 0, width, height);
+}
+
+function castPageUrl() {
+  const origin = state.lanOrigin || location.origin;
+  const url = new URL("/tv", `${origin}/`);
+  url.searchParams.set("scope", state.selected);
+  url.searchParams.set("camera", "stack");
+  return url.href;
+}
+
 function playOnTv() {
   if (!state.selected) {
     toast("Connect a telescope first.");
     return;
   }
-  const url = new URL("/tv", location.href);
-  url.searchParams.set("scope", state.selected);
-  url.searchParams.set("camera", state.camera || "tele");
-  if (location.hostname === "localhost" || location.hostname === "127.0.0.1") {
-    toast("Open the desk from this computer’s network address so the television can reach it, then use Play on TV.");
+  const { plate, video } = castElements();
+  paintCastPlate(plate);
+  if (!state.castTimer) state.castTimer = setInterval(() => paintCastPlate(plate), 100);
+  try {
+    if (!video.srcObject) video.srcObject = plate.captureStream(10);
+  } catch (error) {
+    presentOnTv();
     return;
   }
+  const started = video.play();
+  if (started && started.catch) started.catch(() => {});
+  if (typeof video.webkitShowPlaybackTargetPicker === "function") {
+    video.webkitShowPlaybackTargetPicker();
+    return;
+  }
+  if (video.remote && typeof video.remote.prompt === "function") {
+    video.remote.prompt().catch(() => presentOnTv());
+    return;
+  }
+  presentOnTv();
+}
+
+function presentOnTv() {
+  const page = castPageUrl();
   if (window.PresentationRequest) {
-    const request = new PresentationRequest([url.href]);
+    const request = new PresentationRequest([page]);
     request.start().catch((error) => {
       if (error && error.name === "AbortError") return;
-      window.open(url.href, "seestar-tv");
+      window.open(page, "seestar-tv");
     });
     return;
   }
-  window.open(url.href, "seestar-tv");
+  window.open(page, "seestar-tv");
 }
 
 function startLive(camera) {
@@ -2642,6 +2719,241 @@ function connectSocket() {
   socket.onclose = () => setTimeout(connectSocket, 1500);
 }
 
+function downloadDestText() {
+  if (state.saveDir) return `Saving into ${folderPath()} on this computer.`;
+  if (window.showDirectoryPicker) return "Choose a folder on this computer. The files stay here, not in the desk.";
+  return "This browser saves into its download folder on this computer.";
+}
+
+function folderPath() {
+  const names = state.dirStack.map((item) => item.name).filter(Boolean);
+  if (names.length) return names.join(" / ");
+  return (state.saveDir && state.saveDir.name) || "the chosen folder";
+}
+
+function handleDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("seestar-desk", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("handles");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeHandle(handle) {
+  const db = await handleDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("handles", "readwrite");
+    tx.objectStore("handles").put(handle, "saveDir");
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function loadHandle() {
+  const db = await handleDb();
+  const handle = await new Promise((resolve, reject) => {
+    const request = db.transaction("handles", "readonly").objectStore("handles").get("saveDir");
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return handle;
+}
+
+async function restoreSaveFolder() {
+  try {
+    const handle = await loadHandle();
+    if (!handle || !handle.queryPermission) return;
+    if (await handle.queryPermission({ mode: "readwrite" }) !== "granted") return;
+    state.saveDir = handle;
+    state.dirStack = [handle];
+  } catch (error) { /* the folder can be chosen again */ }
+}
+
+async function pickDirectory() {
+  try {
+    return await showDirectoryPicker({ mode: "readwrite", startIn: "pictures" });
+  } catch (error) {
+    if (error && error.name === "AbortError") return null;
+    throw error;
+  }
+}
+
+async function openFolderWindow() {
+  const dialog = document.querySelector("#folder-window");
+  if (!window.showDirectoryPicker) {
+    toast("This browser saves into its download folder on this computer.");
+    return;
+  }
+  if (!state.dirStack.length) {
+    const picked = await pickDirectory();
+    if (!picked) {
+      state.pendingCopy = null;
+      return;
+    }
+    state.dirStack = [picked];
+  }
+  if (dialog) dialog.hidden = false;
+  await paintFolderWindow();
+}
+
+async function browseFolder() {
+  const picked = await pickDirectory();
+  if (!picked) return;
+  state.dirStack = [picked];
+  await paintFolderWindow();
+}
+
+async function climbFolder() {
+  if (state.dirStack.length < 2) return;
+  state.dirStack.pop();
+  await paintFolderWindow();
+}
+
+async function makeFolder() {
+  const current = state.dirStack[state.dirStack.length - 1];
+  if (!current) return;
+  const name = prompt("Name the new folder");
+  if (!name || !name.trim()) return;
+  const created = await current.getDirectoryHandle(name.trim(), { create: true });
+  state.dirStack.push(created);
+  await paintFolderWindow();
+}
+
+async function paintFolderWindow() {
+  const current = state.dirStack[state.dirStack.length - 1];
+  const path = document.querySelector("#folder-path");
+  const list = document.querySelector("#folder-entries");
+  const up = document.querySelector("#folder-up");
+  if (path) path.textContent = folderPath();
+  if (up) up.disabled = state.dirStack.length < 2;
+  if (!list || !current || !current.entries) return;
+  const rows = [];
+  for await (const [name, handle] of current.entries()) rows.push({ name, handle });
+  rows.sort((a, b) => {
+    if (a.handle.kind !== b.handle.kind) return a.handle.kind === "directory" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  list.innerHTML = rows.map((row, index) => `
+    <button type="button" class="folder-entry" data-index="${index}">${row.handle.kind === "directory" ? "Folder" : "File"} · ${escapeHtml(row.name)}</button>
+  `).join("") || '<div class="muted">This folder is empty.</div>';
+  list.querySelectorAll("[data-index]").forEach((button) => {
+    const row = rows[Number(button.dataset.index)];
+    if (!row || row.handle.kind !== "directory") {
+      button.disabled = true;
+      return;
+    }
+    button.onclick = () => {
+      state.dirStack.push(row.handle);
+      paintFolderWindow();
+    };
+  });
+}
+
+function closeFolderWindow() {
+  const dialog = document.querySelector("#folder-window");
+  if (dialog) dialog.hidden = true;
+  state.pendingCopy = null;
+}
+
+async function useCurrentFolder() {
+  const current = state.dirStack[state.dirStack.length - 1];
+  if (!current) return;
+  state.saveDir = current;
+  const names = state.pendingCopy;
+  state.pendingCopy = null;
+  try { await storeHandle(current); } catch (error) { /* the choice still lasts for this visit */ }
+  const dialog = document.querySelector("#folder-window");
+  if (dialog) dialog.hidden = true;
+  const label = document.querySelector("#download-dest");
+  if (label) label.textContent = downloadDestText();
+  if (names && names.length) await saveNames(names);
+}
+
+async function copySelected() {
+  const names = [...document.querySelectorAll("input[name=file]:checked")].map((node) => node.value);
+  if (!names.length) {
+    toast("Choose at least one file.");
+    return;
+  }
+  if (!state.folder) {
+    toast("Open a session first.");
+    return;
+  }
+  if (!window.showDirectoryPicker) {
+    await downloadInBrowser(names);
+    return;
+  }
+  if (!state.saveDir) {
+    state.pendingCopy = names;
+    await openFolderWindow();
+    return;
+  }
+  const permission = await state.saveDir.requestPermission({ mode: "readwrite" });
+  if (permission !== "granted") {
+    state.saveDir = null;
+    state.dirStack = [];
+    state.pendingCopy = names;
+    await openFolderWindow();
+    return;
+  }
+  await saveNames(names);
+}
+
+async function saveNames(names) {
+  const dir = state.saveDir;
+  for (const name of names) {
+    const path = `MyWorks/${state.folder}/${name}`;
+    const response = await fetch(`${scopePath("/media")}?path=${encodeURIComponent(path)}`);
+    if (!response.ok) throw new Error(`${name} was not copied.`);
+    const handle = await dir.getFileHandle(name, { create: true });
+    const writable = await handle.createWritable();
+    if (response.body && response.body.pipeTo) await response.body.pipeTo(writable);
+    else {
+      await writable.write(await response.blob());
+      await writable.close();
+    }
+  }
+  await finishCopy(names, `${folderPath()} on this computer`);
+}
+
+async function downloadInBrowser(names) {
+  for (const name of names) {
+    const path = `MyWorks/${state.folder}/${name}`;
+    const response = await fetch(`${scopePath("/media")}?path=${encodeURIComponent(path)}`);
+    if (!response.ok) throw new Error(`${name} was not copied.`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+  await finishCopy(names, "your download folder on this computer");
+}
+
+async function finishCopy(names, where) {
+  const remove = document.querySelector("#delete-after")?.checked;
+  const count = `${names.length} file${names.length === 1 ? "" : "s"}`;
+  if (remove) {
+    if (!confirm(`Delete ${count} from the telescope? This cannot be undone.`)) {
+      toast(`Saved ${count} in ${where}.`);
+      return;
+    }
+    const removed = await api(scopePath("/files/delete"), { method: "POST", body: JSON.stringify({ folder: state.folder, names }) });
+    toast(`Saved ${count} and removed ${removed.removed.length} from the telescope.`);
+    state.files = (await api(`${scopePath("/files")}?folder=${encodeURIComponent(state.folder)}`)).files;
+    render();
+    return;
+  }
+  toast(`Saved ${count} in ${where}.`);
+}
+
 async function boot() {
   clock();
   setInterval(clock, 1000);
@@ -2654,10 +2966,15 @@ async function boot() {
     }
     const place = await api("/api/place");
     if (place && place.latitude !== undefined) state.place = place;
+    try {
+      const reach = await api("/api/reach");
+      if (reach.origin) state.lanOrigin = reach.origin;
+    } catch (error) { /* an older desk has no network address */ }
   } catch (error) {
     toast(error.message);
   }
   connectSocket();
+  await restoreSaveFolder();
   render();
 }
 

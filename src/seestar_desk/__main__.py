@@ -14,7 +14,7 @@ from seestar_desk.server import Desk, build_app
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Operate a Seestar from your browser.")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8731)
     parser.add_argument("--demo", action="store_true", help="Run against a simulated S50 Pro.")
     parser.add_argument("--no-browser", action="store_true")
@@ -35,7 +35,8 @@ async def run(host: str, port: int, demo: bool, open_browser: bool) -> None:
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-    url = f"http://{host}:{port}/"
+    shown = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{shown}:{port}/"
     print(f"Seestar Desk is at {url}")
     if open_browser:
         webbrowser.open(url)

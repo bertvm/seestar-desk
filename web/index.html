@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Seestar Desk</title>
-    <link rel="stylesheet" href="/static/app.css?v=41">
+    <link rel="stylesheet" href="/static/app.css?v=44">
 </head>
 <body>
   <header class="strip">
@@ -35,6 +35,20 @@
     </nav>
     <main id="main"></main>
   </div>
-  <script src="/static/app.js?v=59"></script>
+  <div class="folder-shade" id="folder-window" hidden>
+    <section class="card folder-window" role="dialog" aria-modal="true" aria-labelledby="folder-title">
+      <h2 id="folder-title">Choose a folder on this computer</h2>
+      <p class="muted" id="folder-path">No folder yet.</p>
+      <div class="list folder-list" id="folder-entries"></div>
+      <div class="actions">
+        <button type="button" id="folder-up">Up</button>
+        <button type="button" id="folder-browse">Choose another folder</button>
+        <button type="button" id="folder-new">New folder</button>
+        <button type="button" class="primary" id="folder-use">Save files here</button>
+        <button type="button" id="folder-cancel">Cancel</button>
+      </div>
+    </section>
+  </div>
+  <script src="/static/app.js?v=67"></script>
 </body>
 </html>

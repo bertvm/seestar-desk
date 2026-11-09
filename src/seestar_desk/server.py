@@ -6,6 +6,7 @@ import asyncio
 import json
 import mimetypes
 import re
+import socket
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -207,6 +208,7 @@ def build_app(desk: Desk) -> web.Application:
     app.router.add_get("/tv", lambda _request: web.FileResponse(WEB_ROOT / "tv.html"))
     app.router.add_static("/static", WEB_ROOT)
     app.router.add_get("/api/health", health)
+    app.router.add_get("/api/reach", reach)
     app.router.add_get("/api/catalog", catalog)
     app.router.add_get("/api/sky/tonight", tonight)
     app.router.add_get("/api/sky/gaia/{tail:.*}", gaia_survey)
@@ -254,6 +256,28 @@ def build_app(desk: Desk) -> web.Application:
 
 async def health(_request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
+
+
+def lan_address() -> str:
+    """The address another device on this network can use to open the desk."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("1.1.1.1", 80))
+        address = str(probe.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        probe.close()
+    if address.startswith("127."):
+        return ""
+    return address
+
+
+async def reach(request: web.Request) -> web.Response:
+    host = lan_address()
+    port = request.url.port or 80
+    origin = f"http://{host}:{port}" if host else ""
+    return web.json_response({"host": host, "origin": origin})
 
 
 async def catalog(request: web.Request) -> web.Response:

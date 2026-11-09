@@ -272,9 +272,9 @@ class ScopeSession:
         params: dict[str, Any] = {"mode": mode or "star", "target_name": name or "Target", "lp_filter": lp_filter}
         if ra is not None and dec is not None and mode in {"star", ""}:
             params["target_ra_dec"] = [ra, dec]
+        self._note_target(params["target_name"])
         response = await self.command("iscope_start_view", params)
         self.state["mode"] = params["mode"]
-        self.state["target"] = params["target_name"]
         return response
 
     async def move(self, angle: float, speed: int, dur_sec: float) -> dict[str, Any]:
@@ -288,24 +288,31 @@ class ScopeSession:
         return await self.command("iscope_stop_view", params)
 
     async def stack(self, restart: bool, gain: int | None) -> dict[str, Any]:
-        response = await self.command("iscope_start_stack", {"restart": restart})
-        stack = dict(self.state.get("stack") or {})
-        if not stack.get("state"):
-            stack["state"] = "working"
+        previous = dict(self.state.get("stack") or {})
+        stack = dict(previous)
+        stack["state"] = "working"
         if not stack.get("started_at"):
             stack["started_at"] = time.time()
         self.state["stack"] = stack
         self._last_stacked_pull = None
+        await self._quiet_preview()
+        try:
+            response = await self.command("iscope_start_stack", {"restart": restart})
+        except ScopeError:
+            self.state["stack"] = previous
+            raise
+        phase = str((self.state.get("stack") or {}).get("state") or "").lower()
+        if phase not in {"start", "working", "stacking", "complete", "cancel", "fail", "stopped", "stop", "idle"}:
+            current = dict(self.state.get("stack") or {})
+            current["state"] = "working"
+            self.state["stack"] = current
         if gain is not None:
             try:
                 await self.command("set_control_value", ["gain", int(gain)])
             except ScopeError as exc:
                 self.state["last_error"] = str(exc)
         try:
-            await self.live("tele", True)
-            client = self._streams.get("tele")
-            if client:
-                await client.request("get_stacked_img")
+            await self._watch_stack_frames()
         except (ScopeError, OSError, asyncio.TimeoutError) as exc:
             self.state["live_error"] = str(exc)
         return response
@@ -408,6 +415,10 @@ class ScopeSession:
                 await current.stop()
                 self._streams.pop(camera, None)
             return
+        if self._exposure_busy():
+            if camera == "tele":
+                await self._watch_stack_frames()
+            return
         if (
             self.state.get("camera") == camera
             and current
@@ -431,7 +442,7 @@ class ScopeSession:
         await self._ensure_preview(force=True)
         port = self.wide_port if camera == "wide" else self.image_port
         client = ImageClient(
-            self.host, port, camera, self._on_frame, self._on_live_status, self._preview_for_stream
+            self.host, port, camera, self._on_frame, self._on_live_status, self._preview_for_stream, preview=True
         )
         self._streams[camera] = client
         try:
@@ -440,6 +451,62 @@ class ScopeSession:
             self._streams.pop(camera, None)
             raise
         self.state["live_error"] = ""
+
+    def _note_target(self, name: Any) -> None:
+        cleaned = str(name or "").strip()
+        if not cleaned or cleaned.casefold() == "preview":
+            return
+        previous = str(self.state.get("target") or "").strip()
+        if previous.casefold() == cleaned.casefold():
+            return
+        self.state["target"] = cleaned
+        if previous and previous.casefold() != "preview":
+            self._clear_stack_picture()
+
+    def _clear_stack_picture(self) -> None:
+        self.frames.pop("stack", None)
+        self.display_frames.pop("stack", None)
+        self.frame_seq["stack"] = 0
+        self._last_stacked_pull = None
+        stack = dict(self.state.get("stack") or {})
+        for key in ("stacked", "dropped", "total", "elapsed", "state", "started_at"):
+            stack.pop(key, None)
+        self.state["stack"] = stack
+
+    def _exposure_busy(self) -> bool:
+        phase = str((self.state.get("stack") or {}).get("state") or "").lower()
+        if phase in {"start", "working", "stacking"}:
+            return True
+        stage = str((self.state.get("view") or {}).get("stage") or "").lower().replace("_", "")
+        return stage == "stack" or ("dark" in stage and "lib" in stage)
+
+    async def _quiet_preview(self) -> None:
+        """Stop asking for a live picture so it cannot replace the open exposure."""
+        for client in self._streams.values():
+            client.preview = False
+            if client.running:
+                await client.request("stop_streaming")
+
+    async def _watch_stack_frames(self) -> None:
+        client = self._streams.get("tele")
+        if client is None or not client.running:
+            client = ImageClient(
+                self.host,
+                self.image_port,
+                "tele",
+                self._on_frame,
+                self._on_live_status,
+                self._preview_for_stream,
+                preview=False,
+            )
+            self._streams["tele"] = client
+            try:
+                await client.start()
+            except Exception:
+                self._streams.pop("tele", None)
+                raise
+        client.preview = False
+        await client.request("get_stacked_img")
 
     async def _engage_camera(self, camera: str) -> None:
         """Open the telephoto or wide-angle sensor where the telescope is already pointing.
@@ -471,13 +538,15 @@ class ScopeSession:
 
     async def _ensure_preview(self, force: bool = False) -> None:
         """Open the camera where it is pointing so the image port will send frames."""
+        if self._exposure_busy():
+            return
         try:
             await self.command("get_view_state", timeout=4)
         except ScopeError:
             pass
         stage = str((self.state.get("view") or {}).get("stage") or "")
         view_state = str((self.state.get("view") or {}).get("state") or "")
-        if stage == "Stack" or stage == "RTSP" or (stage == "AutoGoto" and view_state == "working"):
+        if self._exposure_busy() or stage == "RTSP" or (stage == "AutoGoto" and view_state == "working"):
             return
         # The wide sensor reports its view as Sleep while it is exposing.
         if view_state == "working" and stage not in {"", "none", "ContinuousExposure"}:
@@ -680,10 +749,6 @@ class ScopeSession:
                         await self.command(method, timeout=4)
                     except ScopeError:
                         continue
-                try:
-                    await self.night.guard_exposure()
-                except ScopeError:
-                    continue
         except asyncio.CancelledError:
             raise
 
@@ -728,7 +793,7 @@ class ScopeSession:
                 view.update(flat)
                 self.state["view"] = view
                 self.state["mode"] = flat.get("mode") or self.state["mode"]
-                self.state["target"] = flat.get("target_name") or self.state["target"]
+                self._note_target(flat.get("target_name"))
         elif method == "set_setting" and isinstance(result, dict):
             settings = dict(self.state.get("settings") or {})
             settings.update(result)
@@ -742,8 +807,11 @@ class ScopeSession:
         if name == "PiStatus":
             _absorb_device(self.state, message)
             self._watch_park(before)
-        elif name in {"AutoGoto", "View", "ContinuousExposure"}:
+        elif name in {"AutoGoto", "View", "ContinuousExposure", "DarkLibrary"}:
+            if name == "DarkLibrary" and "stage" not in message:
+                message = {**message, "stage": "DarkLibrary"}
             _absorb_view(self.state, message)
+            self._note_target(message.get("target_name"))
         elif name in {"Stack", "Exposure"}:
             _absorb_stack(self.state, message)
             self._pull_stack_frame()
@@ -804,13 +872,14 @@ class ScopeSession:
 
 
 class ImageClient:
-    def __init__(self, host: str, port: int, camera: str, on_jpeg, on_status=None, on_need_preview=None) -> None:
+    def __init__(self, host: str, port: int, camera: str, on_jpeg, on_status=None, on_need_preview=None, preview: bool = True) -> None:
         self.host = host
         self.port = port
         self.camera = camera
         self.on_jpeg = on_jpeg
         self.on_status = on_status
         self.on_need_preview = on_need_preview
+        self.preview = preview
         self.running = False
         self._writer: asyncio.StreamWriter | None = None
         self._task: asyncio.Task | None = None
@@ -858,7 +927,8 @@ class ImageClient:
         last_pull = 0.0
         try:
             await self._handshake(parser, reader)
-            await self._send("begin_streaming")
+            if self.preview:
+                await self._send("begin_streaming")
             while self.running:
                 while not self._out.empty():
                     method, params = self._out.get_nowait()
@@ -867,10 +937,10 @@ class ImageClient:
                 if now - last_beat > 4:
                     await self._send("test_connection")
                     last_beat = now
-                if now - last_pull > 3 and not self._saw_frame:
+                if self.preview and now - last_pull > 3 and not self._saw_frame:
                     await self._send("get_current_img")
                     last_pull = now
-                if self._retry_stream:
+                if self.preview and self._retry_stream:
                     self._retry_stream = False
                     await self._send("begin_streaming")
                 try:
@@ -957,7 +1027,7 @@ class ImageClient:
             if item.img_type == ACK:
                 note = item.payload.decode("latin1", "replace").strip()
                 lowered = note.lower()
-                if "continuous exposure" in lowered:
+                if "continuous exposure" in lowered and self.preview:
                     if self.on_need_preview:
                         await self.on_need_preview()
                     self._retry_stream = True
@@ -1031,8 +1101,6 @@ def _absorb_view(state: dict[str, Any], message: dict[str, Any]) -> None:
         if key in message:
             view[key] = message[key]
     state["view"] = view
-    if message.get("target_name"):
-        state["target"] = message["target_name"]
     if message.get("mode"):
         state["mode"] = message["mode"]
 

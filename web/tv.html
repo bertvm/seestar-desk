@@ -31,7 +31,7 @@
   <script>
     const params = new URLSearchParams(location.search);
     const scope = params.get("scope") || "";
-    const camera = params.get("camera") || "tele";
+    const camera = params.get("camera") || "stack";
     const frame = document.querySelector("#frame");
     const caption = document.querySelector("#caption");
     const plate = document.querySelector("#plate");
@@ -49,7 +49,7 @@
     }
 
     frame.onload = () => {
-      caption.textContent = "Live · full frame for a 4K screen";
+      caption.textContent = camera === "stack" ? "Stack · full frame for a 4K screen" : "Live · full frame for a 4K screen";
       const context = plate.getContext("2d");
       plate.width = frame.naturalWidth;
       plate.height = frame.naturalHeight;
@@ -88,7 +88,7 @@
           caption.textContent = "Parked";
           return;
         }
-        if (message.type === "frame" && message.id === scope && (message.camera === camera || message.camera === "stack")) show(message.seq);
+        if (message.type === "frame" && message.id === scope && message.camera === camera) show(message.seq);
       };
       show("latest");
     }
