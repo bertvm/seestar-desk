@@ -50,6 +50,7 @@ class FakeScope:
         self.tracking = True
         self.equatorial = False
         self.parked = False
+        self.park_refusals = 0
         self.stacking = False
         self.cam_id = 0
         self.settings: dict[str, Any] = {
@@ -195,6 +196,9 @@ class FakeScope:
             return _fail(command_id, method, 210, "not supported")
         if not (self.master or self.master_unsupported) and method not in READ_ONLY:
             return _fail(command_id, method, 403, "guest mode: another app has control")
+        if method == "scope_park" and self.park_refusals > 0:
+            self.park_refusals -= 1
+            return _fail(command_id, method, 203, "equipment is moving")
         result = self._result(method, params)
         return _ok(command_id, method, result)
 

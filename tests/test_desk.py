@@ -392,6 +392,17 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("iscope_start_view", methods)
         self.assertFalse(self.session._streams["tele"].preview)
 
+    async def test_mode_switch_waits_until_the_mount_stops(self) -> None:
+        await self.session.claim()
+        self.fake.park_refusals = 1
+        await self.session.set_mount_mode(False)
+        self.assertFalse(self.session.state["equatorial"])
+        self.assertTrue(self.session.state["parked"])
+        self.assertEqual(self.session.state["last_error"], "")
+        parks = [item for item in self.fake.received if item.get("method") == "scope_park"]
+        self.assertGreaterEqual(len(parks), 2)
+        self.assertEqual(parks[-1].get("params"), {"equ_mode": False})
+
     async def test_park_stops_the_image_stream(self) -> None:
         await self.session.claim()
         await self.session.live("tele", True)

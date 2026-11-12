@@ -374,10 +374,32 @@ class ScopeSession:
 
     async def set_mount_mode(self, equatorial: bool) -> dict[str, Any]:
         await self.stop_images()
-        await self.command("scope_move_to_horizon")
-        response = await self.command("scope_park", {"equ_mode": bool(equatorial)})
+        try:
+            await self.command("iscope_stop_view", {})
+        except ScopeError:
+            pass
+        await self._after_motion("scope_move_to_horizon")
+        response = await self._after_motion("scope_park", {"equ_mode": bool(equatorial)})
         self.state["parked"] = True
+        self.state["equatorial"] = bool(equatorial)
+        self.state["last_error"] = ""
+        await self._emit("state", self.snapshot())
         return response
+
+    async def _after_motion(self, method: str, params: Any = None) -> dict[str, Any]:
+        """Retry while the mount is still moving from the previous step."""
+        deadline = time.monotonic() + 90
+        noted = False
+        while True:
+            try:
+                return await self.command(method, params, timeout=20)
+            except ScopeError as exc:
+                if not _equipment_moving(exc) or time.monotonic() >= deadline:
+                    raise
+                if not noted:
+                    await self._note("The telescope is still moving. The mode change continues when it stops.")
+                    noted = True
+                await asyncio.sleep(1.5)
 
     async def power(self, action: str) -> dict[str, Any]:
         method = {"restart": "pi_reboot", "shutdown": "pi_shutdown"}.get(action)
@@ -1148,6 +1170,12 @@ def _networks(result: Any) -> list[dict[str, Any]]:
         elif isinstance(item, dict) and (item.get("ssid") or item.get("name")):
             networks.append({"ssid": item.get("ssid") or item.get("name"), "rssi": item.get("rssi") or item.get("sig_lev")})
     return networks
+
+
+def _equipment_moving(exc: ScopeError) -> bool:
+    code = (exc.response or {}).get("code")
+    text = str(exc).lower()
+    return code == 203 or ("203" in text and "moving" in text)
 
 
 def response_error(message: dict[str, Any]) -> str | None:
