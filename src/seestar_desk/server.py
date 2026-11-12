@@ -20,7 +20,7 @@ from aiohttp import web
 from seestar_desk.album import download_files, gallery_items, list_albums, list_folder
 from seestar_desk.catalog import search
 from seestar_desk.plan import forecast_at
-from seestar_desk.sky import best_tonight, darkness, sun_altitude
+from seestar_desk.sky import best_tonight, darkness, describe_target, sun_altitude
 from seestar_desk.discovery import FoundScope, discover
 from seestar_desk.errors import ScopeError
 from seestar_desk.session import ScopeSession
@@ -280,8 +280,22 @@ async def reach(request: web.Request) -> web.Response:
     return web.json_response({"host": host, "origin": origin})
 
 
+def _flag(value: str | None) -> bool:
+    return str(value or "").lower() in {"1", "true", "on", "yes"}
+
+
 async def catalog(request: web.Request) -> web.Response:
-    return web.json_response({"targets": search(request.query.get("q", ""), limit=80)})
+    found = search(request.query.get("q", ""), limit=80)
+    try:
+        latitude = float(request.query.get("lat", ""))
+        longitude = float(request.query.get("lon", ""))
+    except ValueError:
+        latitude = longitude = None
+    if latitude is not None and -90 <= latitude <= 90 and longitude is not None and -180 <= longitude <= 180:
+        narrowband = _flag(request.query.get("narrowband"))
+        model = request.query.get("model") or ""
+        found = [describe_target(item, latitude, longitude, model=model, narrowband=narrowband) for item in found]
+    return web.json_response({"targets": found})
 
 
 async def read_place(request: web.Request) -> web.Response:
@@ -320,7 +334,19 @@ async def tonight(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="A latitude and longitude are required.") from exc
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
         raise web.HTTPBadRequest(text="That place is outside the map.")
-    return web.json_response(best_tonight(latitude, longitude))
+    try:
+        limit = int(request.query.get("limit") or 5)
+    except ValueError:
+        limit = 5
+    return web.json_response(
+        best_tonight(
+            latitude,
+            longitude,
+            limit=max(1, min(limit, 12)),
+            model=request.query.get("model") or "",
+            narrowband=_flag(request.query.get("narrowband")),
+        )
+    )
 
 
 _GAIA_TILE = re.compile(r"^(?:properties|Norder\d+/Dir\d+/Npix\d+\.eph|Norder\d+/Allsky\.eph)$")

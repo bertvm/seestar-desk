@@ -27,6 +27,17 @@ NAME_OVERRIDES = {
     102: "Spindle Galaxy",
 }
 
+# Major axis in arcminutes, used to compare an object with the telescope's frame.
+SIZE_ARCMIN = {
+    "M1": 6, "M8": 90, "M13": 20, "M16": 35, "M17": 40, "M20": 28, "M27": 8,
+    "M31": 178, "M32": 9, "M33": 71, "M42": 85, "M43": 20, "M44": 95, "M45": 110,
+    "M51": 11, "M57": 1.4, "M64": 10, "M76": 3, "M78": 8, "M81": 27, "M82": 11,
+    "M97": 3, "M101": 29, "M104": 9,
+    "NGC 869": 30, "NGC 884": 30, "NGC 7000": 120, "NGC 6992": 60, "NGC 7293": 16,
+    "NGC 2244": 80, "IC 1805": 150, "IC 1848": 150, "NGC 1499": 145,
+}
+
+
 EXTRAS = [
     {"id": "NGC 869", "name": "Double Cluster, west", "ra": 2.316, "dec": 57.133, "kind": "open cluster", "mag": 3.7},
     {"id": "NGC 884", "name": "Double Cluster, east", "ra": 2.372, "dec": 57.133, "kind": "open cluster", "mag": 3.8},
@@ -69,6 +80,10 @@ def targets() -> list[dict]:
                 }
             )
     rows.extend(EXTRAS)
+    for item in rows:
+        size = SIZE_ARCMIN.get(item["id"])
+        if size is not None:
+            item["size_arcmin"] = size
     rows.sort(key=lambda item: (not str(item["id"]).startswith("M"), _messier_number(item["id"]), item["id"]))
     return rows
 

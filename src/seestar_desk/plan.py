@@ -11,13 +11,26 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from seestar_desk.errors import ScopeError
-from seestar_desk.sky import alt_az, darkness, field_of_view, mosaic_centers, skip_reasons, sun_altitude
+from seestar_desk.sky import (
+    alt_az,
+    angular_distance,
+    darkness,
+    field_of_view,
+    frame_fit,
+    moon_advice,
+    moon_equatorial,
+    moon_sketch,
+    mosaic_centers,
+    skip_reasons,
+    sun_altitude,
+)
 
 DEFAULT_SAFETY = {
     "min_battery": 20,
     "min_altitude": 25,
     "stop_before_dawn": True,
     "max_cloud": 80,
+    "narrowband": False,
 }
 
 
@@ -47,7 +60,10 @@ class NightPlan:
             self.options["park_when_finished"] = bool(options.get("park_when_finished"))
         safety = payload.get("safety")
         if isinstance(safety, dict):
-            self.safety.update({key: safety[key] for key in DEFAULT_SAFETY if key in safety})
+            kept = {key: safety[key] for key in DEFAULT_SAFETY if key in safety}
+            if "narrowband" in kept:
+                kept["narrowband"] = bool(kept["narrowband"])
+            self.safety.update(kept)
 
     def public(self) -> dict[str, Any]:
         moment = datetime.now(timezone.utc)
@@ -198,6 +214,10 @@ class NightPlan:
         copy = dict(item)
         altitude = self._altitude(item, moment)
         copy["altitude"] = None if altitude is None else round(altitude, 1)
+        fitted = frame_fit(item.get("size_arcmin"), str(self.session.state.get("model") or ""))
+        if fitted:
+            copy["fit"] = fitted["fit"]
+        copy["moon_note"] = self._moon_note(item, moment)
         copy["reasons"] = self._hard_reasons(item, moment)
         return copy
 
@@ -223,13 +243,29 @@ class NightPlan:
         cloud = None
         if isinstance(self.weather, dict):
             cloud = _float(self.weather.get("cloud_cover"))
-        return skip_reasons(
+        reasons = skip_reasons(
             altitude=self._altitude(item, moment),
             battery=_float(self.session.state.get("battery")),
             sun_alt=sun_alt,
             cloud=cloud,
             safety=self.safety,
         )
+        note = self._moon_note(item, moment)
+        if note.startswith("The Moon is") and "still suits" not in note:
+            reasons.append(note)
+        return reasons
+
+    def _moon_note(self, item: dict[str, Any], moment: datetime) -> str:
+        lat = _float(self.session.state.get("latitude"))
+        lon = _float(self.session.state.get("longitude"))
+        ra = _float(item.get("ra"))
+        dec = _float(item.get("dec"))
+        if None in (lat, lon, ra, dec):
+            return ""
+        moon_ra, moon_dec = moon_equatorial(moment)
+        moon_alt, _moon_az = alt_az(moon_ra, moon_dec, float(lat), float(lon), moment)
+        separation = angular_distance(float(ra), float(dec), moon_ra, moon_dec)
+        return moon_advice(str(item.get("kind") or ""), separation, moon_alt > 0, bool(self.safety.get("narrowband")))
 
 
 def _clean_item(item: dict[str, Any], model: Any) -> dict[str, Any]:
@@ -247,6 +283,8 @@ def _clean_item(item: dict[str, Any], model: Any) -> dict[str, Any]:
         "gain": None if gain in (None, "") else int(gain),
         "filter": None if item.get("filter") in (None, "") else int(item["filter"]),
         "lp_filter": bool(item.get("lp_filter")),
+        "kind": str(item.get("kind") or ""),
+        "size_arcmin": None if item.get("size_arcmin") in (None, "") else float(item.get("size_arcmin")),
         "autofocus": bool(item.get("autofocus", True)),
         "rows": max(1, int(item.get("rows") or 1)),
         "cols": max(1, int(item.get("cols") or 1)),
@@ -276,7 +314,7 @@ def _open_meteo(lat: float, lon: float) -> dict[str, Any]:
             "longitude": f"{lon:.4f}",
             "current": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,wind_speed_10m,wind_gusts_10m",
             "hourly": "temperature_2m,relative_humidity_2m,dew_point_2m,cloud_cover,precipitation,wind_speed_10m,wind_gusts_10m",
-            "forecast_days": "2",
+            "forecast_days": "7",
             "timezone": "auto",
         }
     )
@@ -291,7 +329,15 @@ def _open_meteo(lat: float, lon: float) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"error": "Weather is unavailable."}
     current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
-    summary = summarize_night(_hourly_samples(payload), lat, lon)
+    samples = _hourly_samples(payload)
+    summary = summarize_night(samples, lat, lon)
+    nights = night_outlooks(samples, lat, lon)
+    summary["nights"] = nights
+    summary["moon"] = moon_sketch()
+    if nights:
+        summary["score"] = nights[0]["score"]
+        summary["score_label"] = nights[0]["label"]
+        summary["advice"] = nights[0]["advice"]
     summary.update(
         {
             "cloud_cover": current.get("cloud_cover"),
@@ -330,6 +376,9 @@ def _hourly_samples(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "humidity": _at(hourly.get("relative_humidity_2m"), index),
                 "wind": _at(hourly.get("wind_speed_10m"), index),
                 "gust": _at(hourly.get("wind_gusts_10m"), index),
+                "precip": _at(hourly.get("precipitation"), index),
+                "day": local.strftime("%A"),
+                "date": f"{local.strftime('%b')} {local.day}",
             }
         )
     return samples
@@ -363,6 +412,137 @@ def summarize_night(samples: list[dict[str, Any]], lat: float, lon: float, momen
         "dew_risk": _dew_risk(run),
         "note": "",
     }
+
+
+def night_outlooks(samples: list[dict[str, Any]], lat: float, lon: float) -> list[dict[str, Any]]:
+    """One card per dark stretch in the hourly forecast."""
+    runs: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for sample in samples:
+        dark = sun_altitude(lat, lon, sample["time"]) <= -12
+        if not dark:
+            if current:
+                runs.append(current)
+                current = []
+            continue
+        if current and sample["time"] - current[-1]["time"] > timedelta(hours=1, minutes=5):
+            runs.append(current)
+            current = []
+        current.append(sample)
+    if current:
+        runs.append(current)
+    nights = []
+    for run in runs:
+        if len(run) < 2:
+            continue
+        middle = run[len(run) // 2]
+        sketch = moon_sketch(middle["time"])
+        hours = []
+        for sample in run:
+            moon_ra, moon_dec = moon_equatorial(sample["time"])
+            moon_alt, _moon_az = alt_az(moon_ra, moon_dec, lat, lon, sample["time"])
+            up = moon_alt > 0
+            hours.append(
+                {
+                    "label": sample["label"],
+                    "end": sample["end"],
+                    "cloud": sample.get("cloud"),
+                    "humidity": sample.get("humidity"),
+                    "wind": sample.get("wind"),
+                    "temp": sample.get("temp"),
+                    "dew": sample.get("dew"),
+                    "precip": sample.get("precip"),
+                    "moon_up": up,
+                    "score": _hour_score(sample, up, sketch["illumination"]),
+                }
+            )
+        shown = hours[:16]
+        score = round(sum(hour["score"] for hour in shown) / len(shown))
+        clearest = _clearest_pair(shown)
+        up_labels = [hour["label"] for hour in shown if hour["moon_up"]]
+        if not up_labels:
+            moon_span = "Down"
+        elif len(up_labels) == len(shown):
+            moon_span = "Up all night"
+        else:
+            moon_span = f"Up {up_labels[0]}–{up_labels[-1]}"
+        clouds = [hour["cloud"] for hour in shown if hour["cloud"] is not None]
+        humid = [hour["humidity"] for hour in shown if hour["humidity"] is not None]
+        winds = [hour["wind"] for hour in shown if hour["wind"] is not None]
+        rain = [hour["precip"] for hour in shown if hour["precip"] is not None]
+        nights.append(
+            {
+                "day": middle.get("day") or "",
+                "date": middle.get("date") or "",
+                "score": score,
+                "label": score_words(score),
+                "advice": score_advice(score, sketch["illumination"]),
+                "dark_hours": round(len(run), 1),
+                "starts": shown[0]["label"],
+                "ends": shown[-1]["end"],
+                "window": "" if clearest is None else f"{clearest[0]['label']}–{clearest[1]['end']}",
+                "clouds": None if not clouds else round(sum(clouds) / len(clouds)),
+                "humidity": None if not humid else round(sum(humid) / len(humid)),
+                "wind": None if not winds else round(sum(winds) / len(winds), 1),
+                "precip": None if not rain else round(sum(rain), 1),
+                "spark": [None if hour["cloud"] is None else round(hour["cloud"]) for hour in shown],
+                "hours": shown,
+                "moon": {**sketch, "span": moon_span},
+            }
+        )
+    return nights[:7]
+
+
+def score_words(score: float) -> str:
+    if score >= 85:
+        return "Excellent"
+    if score >= 70:
+        return "Great"
+    if score >= 55:
+        return "Good"
+    if score >= 40:
+        return "Fair"
+    if score >= 25:
+        return "Poor"
+    return "Bad"
+
+
+def score_advice(score: float, illumination: float) -> str:
+    if score >= 70 and illumination < 0.4:
+        return "Clear enough for faint nebulae and galaxies."
+    if score >= 55:
+        return "Decent conditions. Brighter clusters and galaxies will show well."
+    if illumination >= 0.6:
+        return "A bright Moon. Planets, the Moon, and star clusters hold up better than faint nebulae."
+    return "Cloud or haze is in the way. Wait for a clearer stretch."
+
+
+def _hour_score(sample: dict[str, Any], moon_up: bool, illumination: float) -> int:
+    cloud = float(sample.get("cloud") or 0)
+    score = 100.0 - cloud * 0.62
+    if moon_up:
+        score -= float(illumination) * 22.0
+    temp = sample.get("temp")
+    dew = sample.get("dew")
+    if temp is not None and dew is not None and float(temp) - float(dew) < 2:
+        score -= 12
+    precip = sample.get("precip")
+    if precip is not None and float(precip) > 0.1:
+        score -= 18
+    return int(max(0, min(100, round(score))))
+
+
+def _clearest_pair(hours: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if len(hours) < 2:
+        return None
+    best_index = 0
+    best_cloud = 10_000.0
+    for index in range(len(hours) - 1):
+        pair = (hours[index].get("cloud") or 0) + (hours[index + 1].get("cloud") or 0)
+        if pair < best_cloud:
+            best_cloud = pair
+            best_index = index
+    return hours[best_index], hours[best_index + 1]
 
 
 def _first_run(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:

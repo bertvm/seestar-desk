@@ -17,9 +17,10 @@ from seestar_desk.errors import ScopeError
 from seestar_desk.fake_scope import FakeScope
 from seestar_desk.framing import LineBuffer, dumps
 from seestar_desk.imaging import JPEG, PREVIEW, RAW, FrameParser, build_frame, to_jpeg
-from seestar_desk.plan import summarize_night
+from seestar_desk.plan import night_outlooks, summarize_night
+from seestar_desk.sky import moon_sketch
 from seestar_desk.session import ScopeSession, _absorb_device, _absorb_disk, _absorb_location
-from seestar_desk.sky import alt_az, best_tonight, field_of_view, mosaic_centers, skip_reasons, sun_altitude
+from seestar_desk.sky import alt_az, best_tonight, field_of_view, frame_fit, moon_advice, mosaic_centers, skip_reasons, sun_altitude
 
 
 class ReadingTests(unittest.TestCase):
@@ -481,6 +482,21 @@ class SkyTests(unittest.TestCase):
         summer = best_tonight(52.34, 6.11, noon)
         self.assertGreater(summer["window"]["start"], noon.isoformat())
 
+    def test_frame_fit_and_dual_band_moon(self) -> None:
+        galaxy = frame_fit(178, "Seestar S50 Pro")
+        self.assertIn("mosaic", galaxy["fit"].lower())
+        self.assertGreaterEqual(galaxy["fit_rows"] * galaxy["fit_cols"], 2)
+        self.assertEqual(frame_fit(1.4, "S50")["fit"], "Tiny in the frame")
+        self.assertEqual(frame_fit(85, "S50")["fit"], "A tight crop")
+        close = moon_advice("nebula", 20, True, False)
+        self.assertIn("20", close)
+        self.assertNotIn("dual-band", close)
+        allowed = moon_advice("nebula", 20, True, True)
+        self.assertIn("dual-band", allowed)
+        blocked = moon_advice("nebula", 8, True, True)
+        self.assertNotIn("dual-band", blocked)
+        self.assertIn("8", blocked)
+
     def test_tonight_picks_the_clearest_dark_hours(self) -> None:
         start = datetime(2026, 11, 8, 18, tzinfo=timezone.utc)
         clouds = [80, 70, 20, 10, 10, 15, 60, 90]
@@ -503,6 +519,36 @@ class SkyTests(unittest.TestCase):
         self.assertIn("–", report["window"])
         self.assertEqual(report["dew_risk"], "Moderate")
         self.assertLessEqual(report["low"], 4)
+
+    def test_outlook_scores_a_dark_stretch(self) -> None:
+        sketch = moon_sketch(datetime(2026, 11, 12, 22, tzinfo=timezone.utc))
+        self.assertGreaterEqual(sketch["illumination"], 0)
+        self.assertLessEqual(sketch["illumination"], 1)
+        self.assertTrue(sketch["name"])
+        start = datetime(2026, 11, 12, 16, tzinfo=timezone.utc)
+        samples = []
+        for index in range(40):
+            moment = start + timedelta(hours=index)
+            samples.append({
+                "time": moment,
+                "label": f"{moment.hour:02d}:00",
+                "end": f"{(moment.hour + 1) % 24:02d}:00",
+                "cloud": 20 if index < 20 else 80,
+                "temp": 3.0,
+                "dew": 0.0,
+                "humidity": 70,
+                "wind": 3,
+                "gust": 4,
+                "precip": 0,
+                "day": "Thursday",
+                "date": "Nov 12",
+            })
+        nights = night_outlooks(samples, 52.3, 6.1)
+        self.assertGreaterEqual(len(nights), 1)
+        self.assertIn(nights[0]["label"], {"Excellent", "Great", "Good", "Fair", "Poor", "Bad"})
+        self.assertGreaterEqual(nights[0]["score"], 0)
+        self.assertLessEqual(nights[0]["score"], 100)
+        self.assertTrue(nights[0]["spark"])
 
 
 class DeskMemoryTests(unittest.TestCase):

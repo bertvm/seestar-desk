@@ -1,4 +1,4 @@
-const pages = ["overview", "sky", "picture", "align", "album", "plan", "settings"];
+const pages = ["overview", "sky", "picture", "align", "album", "plan", "explore", "forecast", "settings"];
 const state = {
   page: "overview",
   scopes: [],
@@ -34,6 +34,19 @@ const state = {
   place: null,
   forecast: null,
   theme: "night",
+  narrowband: localStorage.getItem("seestar-narrowband") === "1",
+  wishlist: readList("seestar-wishlist"),
+  exploreKind: "",
+  exploreFilter: "up",
+  exploreSort: "best",
+  exploreQuery: "",
+  explorePicks: [],
+  exploreResults: [],
+  exploreLists: { galaxy: [], nebula: [], cluster: [] },
+  exploreNote: "",
+  exploreLoaded: false,
+  photos: {},
+  forecastNight: 0,
   alignTimer: 0,
 };
 
@@ -67,6 +80,8 @@ function show(page) {
   render();
   syncAlignTimer();
   if (page === "picture" && state.snap && state.snap.connected && !state.snap.parked) startLive(state.camera || "tele");
+  if (page === "explore" || page === "plan") guard(() => loadExplore(false));
+  if (page === "forecast" || page === "plan") guard(() => ensureForecast(false));
 }
 
 async function api(path, options) {
@@ -768,6 +783,7 @@ function paintLevel(snap) {
 }
 
 function paintEquatorial(snap, wedge, latitude) {
+  scopeMarker.repaint = () => paintEquatorial(snap, wedge, latitude);
   const now = document.querySelector('[data-field="eq-now"]');
   const need = document.querySelector('[data-field="eq-need"]');
   const guide = document.querySelector('[data-field="eq-guide"]');
@@ -781,11 +797,101 @@ function paintEquatorial(snap, wedge, latitude) {
     now.classList.toggle("bad", gap !== null && gap >= 2);
   }
   const heading = Number(snap.heading);
+  const north = headingOffset(heading, latitude);
+  const base = document.querySelector('[data-field="eq-north"]');
+  if (base) {
+    const south = Number.isFinite(latitude) && latitude < 0;
+    const pole = south ? "south" : "north";
+    if (north === null) base.textContent = "—";
+    else if (Math.abs(north) <= 8) base.textContent = `Close to true ${pole}`;
+    else base.textContent = `${Math.abs(north).toFixed(0)}° ${north > 0 ? "east" : "west"}`;
+    base.classList.toggle("good", north !== null && Math.abs(north) <= 8);
+    base.classList.toggle("warn", north !== null && Math.abs(north) > 8 && Math.abs(north) <= 15);
+    base.classList.toggle("bad", north !== null && Math.abs(north) > 15);
+  }
   if (guide) guide.textContent = equatorialGuide(wedge, needed, latitude, heading);
-  drawEqDome(wedge, needed, latitude, heading, gap);
+  drawEqDome(wedge, needed, latitude, heading, gap, snap.model);
 }
 
-function drawEqDome(wedge, needed, latitude, heading, gap) {
+const scopeMarkers = {};
+
+// Side views around the upright axis. Index 0 faces the camera.
+// Index increases as the lens turns toward the left of the picture.
+const PRO_SIDES = [
+  "s50-pro-side-0.jpg",
+  "s50-pro-side-1.jpg",
+  "s50-pro-side-2.jpg",
+  "s50-pro-side-3.jpg",
+  "s50-pro-side-4.jpg",
+  "s50-pro-side-3.jpg",
+  "s50-pro-side-6.jpg",
+  "s50-pro-side-7.jpg",
+];
+const PRO_MIRROR = [false, false, false, false, false, true, false, false];
+
+function closedScopeFile(model) {
+  const kind = scopeKind(model);
+  if (kind === "s30") return "s30.jpg";
+  if (kind === "s50") return "s50-closed.jpg";
+  return "s50-pro-closed.jpg";
+}
+
+function sideChoice(model, heading) {
+  if (scopeKind(model) !== "s50pro") return { file: closedScopeFile(model), mirror: false };
+  const face = ((180 - (Number.isFinite(heading) ? heading : 180)) % 360 + 360) % 360;
+  const index = Math.round(face / 45) % 8;
+  return { file: PRO_SIDES[index], mirror: PRO_MIRROR[index] };
+}
+
+function cutBackdrop(img) {
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const pen = canvas.getContext("2d");
+  pen.drawImage(img, 0, 0);
+  const frame = pen.getImageData(0, 0, canvas.width, canvas.height);
+  const px = frame.data;
+  const bg = [px[0], px[1], px[2]];
+  for (let i = 0; i < px.length; i += 4) {
+    const dist = Math.abs(px[i] - bg[0]) + Math.abs(px[i + 1] - bg[1]) + Math.abs(px[i + 2] - bg[2]);
+    if (dist < 48) px[i + 3] = 0;
+    else if (dist < 110) px[i + 3] = Math.round(255 * (dist - 48) / 62);
+  }
+  pen.putImageData(frame, 0, 0);
+  return canvas;
+}
+
+function scopeMarker(model, heading) {
+  const choice = sideChoice(model, heading);
+  let entry = scopeMarkers[choice.file];
+  if (!entry) {
+    entry = { ready: false, canvas: null };
+    scopeMarkers[choice.file] = entry;
+    const img = new Image();
+    img.onload = () => {
+      entry.canvas = cutBackdrop(img);
+      entry.ready = true;
+      if (scopeMarker.repaint) scopeMarker.repaint();
+    };
+    img.src = `/static/scopes/${choice.file}?v=5`;
+  }
+  if (scopeKind(model) === "s50pro") {
+    PRO_SIDES.forEach((file) => {
+      if (scopeMarkers[file]) return;
+      scopeMarkers[file] = { ready: false, canvas: null };
+      const img = new Image();
+      img.onload = () => {
+        scopeMarkers[file].canvas = cutBackdrop(img);
+        scopeMarkers[file].ready = true;
+        if (scopeMarker.repaint) scopeMarker.repaint();
+      };
+      img.src = `/static/scopes/${file}?v=5`;
+    });
+  }
+  return entry.ready ? { canvas: entry.canvas, mirror: choice.mirror } : null;
+}
+
+function drawEqDome(wedge, needed, latitude, heading, gap, model) {
   const canvas = document.querySelector("#eq-dome");
   if (!canvas) return;
   const width = canvas.clientWidth || 520;
@@ -804,7 +910,11 @@ function drawEqDome(wedge, needed, latitude, heading, gap) {
   const line = color("--line", "#2a3444");
   const raise = color("--bg-raise", "#151b24");
   const sink = color("--bg-sink", "#090c11");
-  const dot = gap === null ? text : gap < 0.5 ? color("--good", "#8dceab") : gap < 2 ? color("--warn", "#e0a15a") : color("--bad", "#e58989");
+  const north = headingOffset(heading, latitude);
+  const tiltTone = gap === null ? 0 : gap >= 2 ? 2 : gap >= 0.5 ? 1 : 0;
+  const northTone = north === null ? 0 : Math.abs(north) > 15 ? 2 : Math.abs(north) > 8 ? 1 : 0;
+  const tone = Math.max(tiltTone, northTone);
+  const dot = tone === 0 ? color("--good", "#8dceab") : tone === 1 ? color("--warn", "#e0a15a") : color("--bad", "#e58989");
   const cx = width * 0.5;
   const cy = height * 0.46;
   const radius = Math.min(width, height) * 0.36;
@@ -883,18 +993,45 @@ function drawEqDome(wedge, needed, latitude, heading, gap) {
   }
   if (needed !== null) {
     const target = at(targetAz, needed);
+    const reach = (1 - Math.max(0, Math.min(90, needed)) / 90) * radius;
+    const band = Math.max(14, reach * (8 * Math.PI / 180));
     ctx.beginPath();
-    ctx.arc(target.x, target.y, 8, 0, Math.PI * 2);
+    ctx.arc(target.x, target.y, band, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.globalAlpha = 0.16;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(target.x, target.y, band, 0, Math.PI * 2);
     ctx.strokeStyle = accent;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.5;
     ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(target.x, target.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
   }
   if (wedge !== null) {
     const actual = at(knownHeading ? heading : targetAz, wedge);
-    ctx.beginPath();
-    ctx.arc(actual.x, actual.y, 6.5, 0, Math.PI * 2);
-    ctx.fillStyle = dot;
-    ctx.fill();
+    const picture = scopeMarker(model, knownHeading ? heading : targetAz);
+    if (picture) {
+      const size = Math.max(78, Math.min(112, radius * 0.42));
+      ctx.save();
+      ctx.translate(actual.x, actual.y);
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.36, 0, Math.PI * 2);
+      ctx.strokeStyle = dot;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      if (picture.mirror) ctx.scale(-1, 1);
+      ctx.drawImage(picture.canvas, -size / 2, -size * 0.58, size, size);
+      ctx.restore();
+    } else {
+      ctx.beginPath();
+      ctx.arc(actual.x, actual.y, 6.5, 0, Math.PI * 2);
+      ctx.fillStyle = dot;
+      ctx.fill();
+    }
   }
   ctx.font = "600 15px Inter, Segoe UI, sans-serif";
   ctx.textBaseline = "alphabetic";
@@ -907,27 +1044,30 @@ function drawEqDome(wedge, needed, latitude, heading, gap) {
   ctx.fillText(needed === null ? "Needed —" : `Needed ${needed.toFixed(1)}°`, width - 14, height - 14);
 }
 
+function headingOffset(heading, latitude) {
+  if (!Number.isFinite(heading)) return null;
+  const target = Number.isFinite(latitude) && latitude < 0 ? 180 : 0;
+  let delta = ((heading % 360) + 360) % 360 - target;
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  return delta;
+}
+
 function equatorialGuide(wedge, needed, latitude, heading) {
   const south = Number.isFinite(latitude) && latitude < 0;
   const pole = south ? "south" : "north";
-  const mark = south ? "S" : "N";
   const parts = [];
-  if (wedge === null) parts.push("The current angle appears when the telescope is connected.");
-  else if (needed === null) parts.push(`The wedge is ${wedge.toFixed(1)}°. Save a place in Settings for the angle this location needs.`);
-  else if (Math.abs(wedge - needed) < 0.5) parts.push(`The wedge is ${wedge.toFixed(1)}°, which matches this place.`);
-  else if (wedge > needed) parts.push(`The wedge is ${wedge.toFixed(1)}°. This place needs ${needed.toFixed(1)}°, so lower it ${(wedge - needed).toFixed(1)}°.`);
-  else parts.push(`The wedge is ${wedge.toFixed(1)}°. This place needs ${needed.toFixed(1)}°, so raise it ${(needed - wedge).toFixed(1)}°.`);
-  if (!Number.isFinite(heading)) parts.push(`You are looking up through the dome. True ${pole} is ${south ? "at the bottom" : "at the top"}, and east is on the left.`);
+  if (wedge === null) parts.push("The tilt appears when the telescope is connected.");
+  else if (needed === null) parts.push(`The wedge is ${wedge.toFixed(1)}°. Save a place in Settings for the tilt this location needs.`);
+  else if (Math.abs(wedge - needed) < 0.5) parts.push(`Tilt matches this place at ${wedge.toFixed(1)}°.`);
+  else if (wedge > needed) parts.push(`Lower the wedge ${(wedge - needed).toFixed(1)}°. It is ${wedge.toFixed(1)}° and this place needs ${needed.toFixed(1)}°.`);
+  else parts.push(`Raise the wedge ${(needed - wedge).toFixed(1)}°. It is ${wedge.toFixed(1)}° and this place needs ${needed.toFixed(1)}°.`);
+  const delta = headingOffset(heading, latitude);
+  if (delta === null) parts.push(`Then turn the base until the dot sits in the band around true ${pole}. East is on the left.`);
+  else if (Math.abs(delta) <= 8) parts.push(`The base is inside the true-${pole} band. The compass is only this close; Seestar’s sky check does the fine alignment.`);
   else {
-    const target = south ? 180 : 0;
-    let delta = ((heading % 360) + 360) % 360 - target;
-    if (delta > 180) delta -= 360;
-    if (delta < -180) delta += 360;
-    if (Math.abs(delta) < 3) parts.push(`The dot is on true ${pole}.`);
-    else {
-      const side = delta > 0 ? "east" : "west";
-      parts.push(`The wedge points ${Math.abs(delta).toFixed(0)}° ${side} of true ${pole}. Turn it until the dot meets ${mark}. East is on the left, as in the sky.`);
-    }
+    const turn = delta > 0 ? "west" : "east";
+    parts.push(`The base is ${Math.abs(delta).toFixed(0)}° ${delta > 0 ? "east" : "west"} of true ${pole}. Turn it toward ${turn} until the dot sits in the band.`);
   }
   return parts.join(" ");
 }
@@ -988,6 +1128,8 @@ function render() {
   const main = document.querySelector("#main");
   const view = {
     overview: renderOverview,
+    explore: renderExplore,
+    forecast: renderForecast,
     sky: renderSky,
     picture: renderPicture,
     align: renderAlign,
@@ -1179,6 +1321,7 @@ function renderSky() {
         <button id="sky-plan" type="button" disabled>Add to tonight</button>
         <button id="best-tonight" type="button">Best tonight</button>
       </div>
+      <label class="row"><input id="narrowband" type="checkbox"${state.narrowband ? " checked" : ""}> Dual-band filter. Emission nebulae stay available when the Moon is up.</label>
     </div>
     <section class="card tonight" id="tonight-card" hidden>
       <h2>Best tonight</h2>
@@ -1355,19 +1498,34 @@ function renderAlign() {
     ${banner()}
     <div class="align-board">
       <section class="card eq-setup">
-        <h2>Equatorial setup</h2>
+        <h2>Pre-alignment</h2>
+        <p class="muted">Do this before Seestar checks the sky. Match the tilt to this place, then turn the base until it sits in the true-north band. The tilt comes from the level sensor. The compass only needs to be close enough for that later check to see the pole.</p>
         <div class="eq-screen">
-          <canvas id="eq-dome" width="640" height="440" aria-label="Dome with true north and the current wedge angle"></canvas>
+          <div class="eq-radar">
+            <canvas id="eq-dome" width="640" height="440" aria-label="Dome with the wedge tilt and the true-north band"></canvas>
+            <div class="radar-level">
+              <div class="bubble" id="level-bubble" title="The scale is 5 degrees at the edge"><span class="dot"></span></div>
+              <div>
+                <span class="muted">Tripod level</span>
+                <p class="level-readout" data-field="level-angle">—</p>
+                <p class="muted" data-field="level-note">The level appears after the telescope connects.</p>
+              </div>
+            </div>
+          </div>
           <div class="eq-angles">
             <div>
-              <span class="muted">Current angle</span>
+              <span class="muted">Tilt now</span>
               <p class="level-readout" data-field="eq-now">—</p>
             </div>
             <div>
-              <span class="muted">Needed here</span>
+              <span class="muted">Tilt needed</span>
               <p class="level-readout needed" data-field="eq-need">—</p>
             </div>
-            <p class="muted eq-guide" data-field="eq-guide">Look up through the dome. Set the wedge to the angle for this place, then turn it until the dot meets true north. East is on the left.</p>
+            <div>
+              <span class="muted">Base</span>
+              <p class="level-readout" data-field="eq-north">—</p>
+            </div>
+            <p class="muted eq-guide" data-field="eq-guide">Set the wedge tilt, then turn the base until the dot sits in the band around true north. East is on the left.</p>
           </div>
         </div>
         <label class="row"><input id="eq-ready" type="checkbox"${ready ? " checked" : ""}> The scope is on a wedge, set to this latitude, facing the pole, and the arm can swing freely</label>
@@ -1376,12 +1534,6 @@ function renderAlign() {
           <button id="to-az">Switch to alt-az</button>
         </div>
         <p class="muted">Switching mode levels the arm and then parks. That is how the telescope changes between alt-az and equatorial.</p>
-      </section>
-      <section class="card level-card">
-        <h2>Tripod level</h2>
-        <div class="bubble" id="level-bubble" title="The scale is 5 degrees at the edge"><span class="dot"></span></div>
-        <p class="level-readout" data-field="level-angle">—</p>
-        <p class="muted" data-field="level-note">The level appears after the telescope connects.</p>
       </section>
       <div class="align-side">
         <section class="card">
@@ -1569,6 +1721,568 @@ function fileThumb(file) {
   return `<img class="mini" alt="" src="${scopePath("/media")}?path=${encodeURIComponent(path)}">`;
 }
 
+function readList(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseCurve(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function scoreTone(score) {
+  const value = Number(score);
+  if (value >= 85) return "excellent";
+  if (value >= 70) return "great";
+  if (value >= 55) return "good";
+  if (value >= 40) return "fair";
+  if (value >= 25) return "poor";
+  return "bad";
+}
+
+function scoreRing(score) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(score) || 0)));
+  return `<div class="score-ring ${scoreTone(value)}" style="--score:${value}"><span>${value}</span></div>`;
+}
+
+function moonCrescent(onRight, fraction) {
+  const amount = Math.max(0, Math.min(0.5, fraction));
+  const radius = 46;
+  const inner = (1 - 2 * amount) * radius;
+  const sweep = onRight ? 1 : 0;
+  return `M 50 4 A ${radius} ${radius} 0 0 ${sweep} 50 96 A ${inner} ${radius} 0 0 ${1 - sweep} 50 4 Z`;
+}
+
+function moonDisc(moon) {
+  if (!moon) return "";
+  const lit = Math.max(0, Math.min(1, Number(moon.illumination) || 0));
+  const brightOnRight = moon.waxing !== false;
+  const light = "#efe6d4";
+  const dark = "#1b2433";
+  const shapes = lit >= 0.5
+    ? `<circle cx="50" cy="50" r="46" fill="${light}"/><path d="${moonCrescent(!brightOnRight, 1 - lit)}" fill="${dark}"/>`
+    : `<circle cx="50" cy="50" r="46" fill="${dark}"/><path d="${moonCrescent(brightOnRight, lit)}" fill="${light}"/>`;
+  const label = `${moon.name || "Moon"}, ${Math.round(lit * 100)} percent lit`;
+  return `<svg class="moon-disc" viewBox="0 0 100 100" role="img" aria-label="${escapeHtml(label)}">${shapes}</svg>`;
+}
+
+function artSeed(id) {
+  return Array.from(String(id || "sky")).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+}
+
+function photoTitles(target) {
+  const titles = [];
+  const add = (title) => {
+    const text = String(title || "").trim();
+    if (text && !titles.includes(text)) titles.push(text);
+  };
+  const id = String((target && (target.id || target.name)) || "");
+  const messier = /^M(\d+)$/.exec(id);
+  if (messier) add(`Messier ${messier[1]}`);
+  else add(id);
+  const name = target && target.name;
+  add(name);
+  add(String(name || "").split(",")[0]);
+  return titles;
+}
+
+function objectArt(target, index) {
+  const id = target && (target.id || target.name);
+  const url = id && state.photos[id];
+  if (url) {
+    return `<img class="art" alt="" width="1280" height="800" loading="lazy" decoding="async" referrerpolicy="no-referrer" src="${escapeHtml(url)}">`;
+  }
+  return objectSketch(target && target.kind, id, index);
+}
+
+function kindSample(kind) {
+  const list = state.exploreLists[kind] || [];
+  return list.find((item) => state.photos[item.id]) || list[0] || { id: kind, kind };
+}
+
+async function loadPhotos(list) {
+  const pending = [];
+  const titleToId = {};
+  for (const target of list || []) {
+    const id = target && (target.id || target.name);
+    if (!id || state.photos[id] !== undefined || pending.includes(id)) continue;
+    pending.push(id);
+    state.photos[id] = null;
+    for (const title of photoTitles(target)) titleToId[title] = id;
+  }
+  if (!pending.length) return;
+  const titles = Object.keys(titleToId);
+  try {
+    for (let start = 0; start < titles.length; start += 40) {
+      const chunk = titles.slice(start, start + 40);
+      const params = new URLSearchParams({
+        action: "query",
+        format: "json",
+        origin: "*",
+        redirects: "1",
+        prop: "pageimages",
+        piprop: "thumbnail",
+        pithumbsize: "1280",
+        titles: chunk.join("|"),
+      });
+      const data = await fetch(`https://en.wikipedia.org/w/api.php?${params}`).then((response) => response.json());
+      const query = data.query || {};
+      const map = {};
+      chunk.forEach((title) => { map[title] = titleToId[title]; });
+      for (const redirect of query.redirects || []) {
+        if (map[redirect.from]) map[redirect.to] = map[redirect.from];
+      }
+      for (const page of Object.values(query.pages || {})) {
+        const id = map[page.title];
+        const source = page.thumbnail && page.thumbnail.source;
+        if (id && source) state.photos[id] = source;
+      }
+    }
+  } catch {
+    /* The drawing stays in place when the photograph cannot be fetched. */
+  }
+  for (const id of pending) if (!state.photos[id]) state.photos[id] = "";
+  if (state.page === "explore" || state.page === "plan") render();
+}
+
+function objectSketch(kind, id, index) {
+  const seed = artSeed(id) + Number(index || 0) * 13;
+  const hue = (seed * 47) % 360;
+  const text = String(kind || "").toLowerCase();
+  const mark = `art${seed}`;
+  if (text.includes("galaxy")) {
+    const tilt = (seed % 50) - 25;
+    return `<svg class="art" viewBox="0 0 320 180" aria-hidden="true"><defs><radialGradient id="${mark}" cx="50%" cy="50%" r="60%"><stop offset="0%" stop-color="hsl(${hue},35%,86%)"/><stop offset="42%" stop-color="hsl(${(hue + 24) % 360},42%,48%)"/><stop offset="100%" stop-color="#090d16"/></radialGradient></defs><rect width="320" height="180" fill="#090d16"/><ellipse cx="160" cy="90" rx="128" ry="36" fill="url(#${mark})" transform="rotate(${tilt} 160 90)"/><ellipse cx="160" cy="90" rx="34" ry="16" fill="hsl(${hue},25%,88%)" transform="rotate(${tilt} 160 90)"/></svg>`;
+  }
+  if (text.includes("nebula")) {
+    return `<svg class="art" viewBox="0 0 320 180" aria-hidden="true"><rect width="320" height="180" fill="#120e16"/><circle cx="${70 + (seed % 90)}" cy="88" r="74" fill="hsl(${hue},68%,46%)" opacity="0.55"/><circle cx="${170 + (seed % 50)}" cy="78" r="58" fill="hsl(${(hue + 36) % 360},62%,64%)" opacity="0.42"/><circle cx="214" cy="112" r="34" fill="hsl(${(hue + 190) % 360},35%,74%)" opacity="0.38"/></svg>`;
+  }
+  if (text.includes("cluster")) {
+    const dots = Array.from({ length: 22 }, (_, dot) => {
+      const x = (seed * (dot + 3) * 17) % 300 + 10;
+      const y = (seed * (dot + 5) * 13) % 150 + 14;
+      return `<circle cx="${x}" cy="${y}" r="${1 + (dot % 3)}" fill="hsl(${(hue + dot * 6) % 360},18%,${68 + (dot % 24)}%)"/>`;
+    }).join("");
+    return `<svg class="art" viewBox="0 0 320 180" aria-hidden="true"><rect width="320" height="180" fill="#0c1018"/>${dots}</svg>`;
+  }
+  return `<svg class="art" viewBox="0 0 320 180" aria-hidden="true"><rect width="320" height="180" fill="#10141c"/><circle cx="160" cy="90" r="26" fill="hsl(${hue},28%,82%)"/></svg>`;
+}
+
+function fitChip(fit) {
+  if (!fit) return "";
+  const tone = /mosaic/i.test(fit) ? "chip warn" : /tiny/i.test(fit) ? "chip" : "chip good";
+  const short = /mosaic/i.test(fit) ? "Mosaic" : /tiny/i.test(fit) ? "Tiny" : /tight/i.test(fit) ? "Tight" : "Fits";
+  return `<span class="${tone}">${escapeHtml(short)}</span>`;
+}
+
+function upChip(target) {
+  if (target.rises === false || (target.peak_altitude !== undefined && target.peak_altitude < 25)) {
+    return `<span class="chip bad">Low from here</span>`;
+  }
+  if (Number(target.altitude) > 20) return `<span class="chip good">Up tonight</span>`;
+  return `<span class="chip">Best later</span>`;
+}
+
+function sparkline(values) {
+  const nums = (values || []).map((value) => (value == null ? 0 : Number(value)));
+  if (nums.length < 2) return "";
+  const step = 120 / (nums.length - 1);
+  const points = nums.map((value, index) => `${(index * step).toFixed(1)},${(28 - (Math.max(0, Math.min(100, value)) / 100) * 24).toFixed(1)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 120 32" aria-hidden="true"><polyline points="${points}"/></svg>`;
+}
+
+function altitudeChart(items) {
+  const series = items.filter((item) => Array.isArray(item.curve) && item.curve.length > 1);
+  if (!series.length) return `<p class="muted">Altitude curves appear when a target comes from Explore or a search.</p>`;
+  const width = 640;
+  const height = 150;
+  const lines = series.map((item, index) => {
+    const step = width / (item.curve.length - 1);
+    const points = item.curve.map((alt, point) => {
+      const y = height - ((Math.max(-10, Math.min(90, Number(alt))) + 10) / 100) * height;
+      return `${(point * step).toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    return `<polyline points="${points}" style="stroke:hsl(${(index * 68) % 360},58%,64%)"/>`;
+  }).join("");
+  const limit = height - ((25 + 10) / 100) * height;
+  return `<svg class="alt-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Altitude through the night"><line class="alt-limit" x1="0" y1="${limit}" x2="${width}" y2="${limit}"/>${lines}</svg>`;
+}
+
+function forecastBundle() {
+  const report = state.forecast || {};
+  const weather = report.weather || {};
+  const nights = Array.isArray(weather.nights) ? weather.nights : [];
+  const index = Math.max(0, Math.min(state.forecastNight, Math.max(0, nights.length - 1)));
+  return { report, weather, nights, night: nights[index] || null, sky: report.sky || {} };
+}
+
+function renderExplore() {
+  const picks = visibleTargets(state.explorePicks, true);
+  const searching = state.exploreQuery.trim().length > 0;
+  const results = visibleTargets(state.exploreResults);
+  const kinds = [
+    { id: "galaxy", title: "Galaxies", line: "Other star cities. The large ones need a mosaic." },
+    { id: "nebula", title: "Nebulae", line: "Clouds of gas. Dual-band keeps them useful when the Moon is up." },
+    { id: "cluster", title: "Clusters", line: "Packed stars. They still show under a brighter Moon." },
+  ];
+  const kind = kinds.find((item) => item.id === state.exploreKind);
+  const kindItems = kind ? visibleTargets(state.exploreLists[kind.id] || []) : [];
+  return `
+    <section class="studio-hero">
+      <div>
+        <h1>Explore</h1>
+        <p class="muted">Find something worth photographing from this place. Search a name or number, or browse by kind.</p>
+        <label class="search-line"><span class="muted">Search</span><input id="explore-query" value="${escapeHtml(state.exploreQuery)}" placeholder="M42, Veil, Andromeda"></label>
+      </div>
+      <label class="row narrow-toggle"><input id="narrowband" type="checkbox"${state.narrowband ? " checked" : ""}> Dual-band filter for emission nebulae</label>
+    </section>
+    ${state.exploreNote ? `<p class="muted">${escapeHtml(state.exploreNote)}</p>` : ""}
+    ${searching ? `
+      <section>
+        <h2>Search</h2>
+        <div class="card-row" id="explore-results">${results.map((target, index) => objectCard(target, index, "results")).join("") || `<p class="muted">Nothing in the catalog matches.</p>`}</div>
+      </section>` : `
+      <section>
+        <div class="row"><h2>Best tonight from this place</h2></div>
+        <div class="card-row">${picks.map((target, index) => objectCard(target, index, "picks")).join("") || `<p class="muted">Save a place, then the best targets for the dark hours appear here.</p>`}</div>
+      </section>
+      ${kind ? `
+        <section>
+          <button type="button" id="explore-back">Back to Explore</button>
+          <div class="kind-hero">${objectArt(kindSample(kind.id), 1)}<div><h2>${kind.title}</h2><p class="muted">${kind.line}</p></div></div>
+          ${exploreFilters()}
+          <div class="card-grid">${kindItems.map((target, index) => objectCard(target, index, kind.id)).join("") || `<p class="muted">None of these are up with the current filter.</p>`}</div>
+        </section>` : `
+        <section>
+          <h2>Browse by kind</h2>
+          <div class="kind-row">${kinds.map((item) => `
+            <button type="button" class="kind-tile" data-kind="${item.id}">
+              ${objectArt(kindSample(item.id), 2)}
+              <span><b>${item.title}</b><span class="muted">${(state.exploreLists[item.id] || []).length || ""}</span></span>
+            </button>`).join("")}
+          </div>
+        </section>`}
+    `}`;
+}
+
+function exploreFilters() {
+  const filters = [["up", "Up tonight"], ["visible", "Visible from here"], ["all", "Everything"]];
+  const sorts = [["best", "Best"], ["bright", "Brightest"], ["large", "Largest"], ["name", "Name"]];
+  return `<div class="chip-row">
+    ${filters.map(([id, label]) => `<button type="button" data-filter="${id}" class="${state.exploreFilter === id ? "primary" : ""}">${label}</button>`).join("")}
+    <span class="muted">Sort</span>
+    ${sorts.map(([id, label]) => `<button type="button" data-sort="${id}" class="${state.exploreSort === id ? "primary" : ""}">${label}</button>`).join("")}
+  </div>`;
+}
+
+function visibleTargets(items, keepRank) {
+  let rows = (items || []).slice();
+  if (state.exploreFilter === "up") {
+    rows = rows.filter((target) => target.rises !== false && (target.peak_altitude == null || target.peak_altitude >= 25));
+  } else if (state.exploreFilter === "visible") {
+    rows = rows.filter((target) => target.peak_altitude == null || target.peak_altitude >= 15);
+  }
+  if (keepRank && state.exploreSort === "best") return rows.slice(0, 8);
+  if (state.exploreSort === "bright") rows.sort((a, b) => (a.mag ?? 99) - (b.mag ?? 99));
+  else if (state.exploreSort === "large") rows.sort((a, b) => (b.size_arcmin || 0) - (a.size_arcmin || 0));
+  else if (state.exploreSort === "name") rows.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  else rows.sort((a, b) => (b.peak_altitude || 0) - (a.peak_altitude || 0));
+  return rows.slice(0, 8);
+}
+
+function objectCard(target, index, pool) {
+  const saved = state.wishlist.includes(target.id);
+  return `<article class="object-card">
+    <div class="art-wrap">${objectArt(target, index)}
+      <div class="art-badges">${upChip(target)}<button type="button" data-open-sky="${index}" data-pool="${pool}">Sky</button></div>
+    </div>
+    <div class="object-body">
+      <h3>${escapeHtml(target.id)} · ${escapeHtml(target.name)}</h3>
+      <p class="muted">${escapeHtml(target.kind || "")}</p>
+      <div class="stat-row">
+        <div><span>Now</span><b>${target.altitude == null ? "—" : `${Math.round(target.altitude)}°`}</b></div>
+        <div><span>Highest</span><b>${target.peak_altitude == null ? "—" : `${Math.round(target.peak_altitude)}°`}</b></div>
+        <div><span>Mag</span><b>${target.mag == null ? "—" : target.mag}</b></div>
+        ${fitChip(target.fit)}
+      </div>
+      <p class="muted">${escapeHtml(target.moon_note || target.fit || "")}</p>
+      <div class="actions">
+        <button type="button" data-wish="${escapeHtml(target.id)}" class="${saved ? "primary" : ""}">${saved ? "Saved" : "Save"}</button>
+        <button type="button" class="primary" data-plan-object="${index}" data-pool="${pool}">Plan tonight</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function renderForecast() {
+  const { report, weather, nights, night } = forecastBundle();
+  if (report.error && !weather.nights) {
+    return `<div class="page-head"><h1>Forecast</h1></div><p class="muted">${escapeHtml(report.error)}</p>`;
+  }
+  if (!state.forecast) {
+    return `<div class="page-head"><h1>Forecast</h1></div><p class="muted">The forecast loads from the saved place.</p>`;
+  }
+  const moon = (night && night.moon) || weather.moon || {};
+  const hours = (night && night.hours) || [];
+  return `
+    <section class="studio-hero forecast-hero">
+      <div class="hero-score">${scoreRing(night ? night.score : weather.score)}
+        <div>
+          <p class="kicker">Tonight</p>
+          <h1>${escapeHtml((night && night.label) || weather.score_label || "Forecast")}</h1>
+          <p class="muted">${escapeHtml((night && night.advice) || weather.advice || weather.error || "Astronomy weather for this place.")}</p>
+        </div>
+      </div>
+      <div class="moon-block">${moonDisc(moon)}<div><p class="kicker">Moon</p><b>${escapeHtml(moon.name || "Moon")}</b><p class="muted">${moon.illumination == null ? "" : `${Math.round(moon.illumination * 100)}% lit`}${moon.span ? ` · ${escapeHtml(moon.span)}` : ""}</p></div></div>
+      <button type="button" id="forecast-refresh">Refresh</button>
+    </section>
+    ${night ? `<div class="stat-tiles">
+      <article><span class="muted">Dark hours</span><b>${night.dark_hours}h</b></article>
+      <article><span class="muted">Starts</span><b>${escapeHtml(night.starts || "—")}</b></article>
+      <article><span class="muted">Ends</span><b>${escapeHtml(night.ends || "—")}</b></article>
+      <article><span class="muted">Clearest</span><b>${escapeHtml(night.window || "—")}</b></article>
+    </div>` : ""}
+    <div class="ribbon-wrap">${conditionRibbon((night && night.hours) || [])}</div>
+    <div class="night-pills">${nights.map((item, index) => `
+      <button type="button" data-night="${index}" class="${index === state.forecastNight ? "primary" : ""}">
+        <span>${escapeHtml(item.day || "")}</span><b>${escapeHtml(item.date || "")}</b><i class="pill-score ${scoreTone(item.score)}"></i>
+      </button>`).join("")}</div>
+    <section class="card">
+      <h2>Tonight's imaging window</h2>
+      <div class="hour-table">${hourRows(hours)}</div>
+      <p class="muted">85+ excellent, 70+ great, 55+ good, 40+ fair, 25+ poor. Cloud pulls the score down, and a bright Moon pulls it down further.</p>
+    </section>
+    <section>
+      <h2>The nights ahead</h2>
+      <div class="night-cards">${nights.map((item) => `
+        <article class="night-card">
+          <div class="row"><div><b>${escapeHtml(item.day)}</b><div class="muted">${escapeHtml(item.date)}</div></div><div class="night-score ${scoreTone(item.score)}"><b>${item.score}</b><span>${escapeHtml(item.label)}</span></div></div>
+          ${sparkline(item.spark)}
+          <p class="muted">Cloud through the night</p>
+          <p>Clouds ${item.clouds == null ? "—" : item.clouds + "%"} · Humidity ${item.humidity == null ? "—" : item.humidity + "%"} · Wind ${item.wind == null ? "—" : item.wind + " m/s"}</p>
+        </article>`).join("")}</div>
+      <p class="muted">Forecast: Open-Meteo</p>
+    </section>`;
+}
+
+function conditionRibbon(hours) {
+  if (!hours || hours.length < 2) return "";
+  const width = 720;
+  const height = 120;
+  const step = width / (hours.length - 1);
+  const points = hours.map((hour, index) => {
+    const y = height - 12 - ((Number(hour.score) || 0) / 100) * (height - 28);
+    return `${(index * step).toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const labels = hours.filter((_, index) => index % Math.ceil(hours.length / 6) === 0)
+    .map((hour) => `<span>${escapeHtml(hour.label)}</span>`).join("");
+  return `<svg class="ribbon" viewBox="0 0 ${width} ${height}" role="img" aria-label="Score through the night"><polyline points="${points}"/></svg><div class="ribbon-labels">${labels}</div>`;
+}
+
+function exploreTarget(pool, index) {
+  if (pool === "picks") return visibleTargets(state.explorePicks, true)[index];
+  if (pool === "results") return visibleTargets(state.exploreResults)[index];
+  return visibleTargets(state.exploreLists[pool] || [])[index];
+}
+
+function rememberTarget(target, minutes) {
+  state.planItems.push({
+    name: target.id || target.name,
+    ra: Number(target.ra),
+    dec: Number(target.dec),
+    mode: "star",
+    minutes: minutes || 30,
+    rows: target.fit_rows || 1,
+    cols: target.fit_cols || 1,
+    overlap: 20,
+    gain: 80,
+    autofocus: true,
+    kind: target.kind || "",
+    size_arcmin: target.size_arcmin ?? "",
+    fit: target.fit || "",
+    curve: target.curve || [],
+    peak_altitude: target.peak_altitude,
+    altitude: target.altitude,
+    moon_note: target.moon_note || "",
+  });
+}
+
+function toggleWish(id) {
+  if (!id) return;
+  state.wishlist = state.wishlist.includes(id)
+    ? state.wishlist.filter((item) => item !== id)
+    : state.wishlist.concat(id);
+  localStorage.setItem("seestar-wishlist", JSON.stringify(state.wishlist));
+  render();
+}
+
+async function loadExplore(force) {
+  if (state.exploreLoaded && !force) return;
+  const here = placeNow(state.snap || {});
+  if (!here) state.exploreNote = "Save a place in Settings so altitude and the Moon are for your sky.";
+  const params = new URLSearchParams({ limit: "8" });
+  if (here) {
+    params.set("lat", String(here.latitude));
+    params.set("lon", String(here.longitude));
+  }
+  if (state.narrowband) params.set("narrowband", "1");
+  if (state.snap && state.snap.model) params.set("model", state.snap.model);
+  if (here) {
+    const tonight = await api(`/api/sky/tonight?${params}`);
+    state.explorePicks = tonight.picks || [];
+    state.exploreNote = tonight.note || state.exploreNote || "";
+  }
+  for (const kind of ["galaxy", "nebula", "cluster"]) {
+    const data = await api(catalogUrl(kind));
+    state.exploreLists[kind] = data.targets || [];
+  }
+  state.exploreLoaded = true;
+  if (state.page === "explore" || state.page === "plan") render();
+  const pool = state.explorePicks.concat(state.planItems);
+  for (const kind of Object.values(state.exploreLists)) pool.push(...kind);
+  await loadPhotos(pool);
+}
+
+async function ensureForecast(force) {
+  if (!force && state.forecast && (state.forecast.weather || state.forecast.error)) return;
+  try {
+    state.forecast = await api("/api/place/weather");
+  } catch (error) {
+    state.forecast = { error: error.message || "The forecast is unavailable." };
+  }
+  if (state.page === "forecast" || state.page === "plan") render();
+}
+
+async function planMyNight() {
+  const here = placeNow(state.snap || {});
+  if (!here) {
+    toast("Save a place in Settings first.");
+    return;
+  }
+  const params = new URLSearchParams({ lat: String(here.latitude), lon: String(here.longitude), limit: "4" });
+  if (state.narrowband) params.set("narrowband", "1");
+  if (state.snap && state.snap.model) params.set("model", state.snap.model);
+  const data = await api(`/api/sky/tonight?${params}`);
+  let added = 0;
+  for (const pick of data.picks || []) {
+    if (state.planItems.some((item) => item.name === pick.id)) continue;
+    rememberTarget(pick, 30);
+    added += 1;
+  }
+  toast(added ? `${added} targets added to tonight. The telescope stays where it is.` : "Those targets are already on the list.");
+  render();
+}
+
+function bindStudio() {
+  const query = document.querySelector("#explore-query");
+  if (query) {
+    query.oninput = () => {
+      state.exploreQuery = query.value;
+      guard(async () => {
+        if (!state.exploreQuery.trim()) {
+          state.exploreResults = [];
+          render();
+          return;
+        }
+        const data = await api(catalogUrl(state.exploreQuery));
+        state.exploreResults = data.targets || [];
+        if (state.page === "explore") render();
+        await loadPhotos(state.exploreResults);
+        const again = document.querySelector("#explore-query");
+        if (again) {
+          again.focus();
+          again.setSelectionRange(again.value.length, again.value.length);
+        }
+      });
+    };
+  }
+  document.querySelectorAll("[data-kind]").forEach((button) => {
+    button.onclick = () => {
+      state.exploreKind = button.dataset.kind;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-filter]").forEach((button) => {
+    button.onclick = () => {
+      state.exploreFilter = button.dataset.filter;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-sort]").forEach((button) => {
+    button.onclick = () => {
+      state.exploreSort = button.dataset.sort;
+      render();
+    };
+  });
+  const back = document.querySelector("#explore-back");
+  if (back) back.onclick = () => {
+    state.exploreKind = "";
+    render();
+  };
+  document.querySelectorAll("[data-wish]").forEach((button) => {
+    button.onclick = () => toggleWish(button.dataset.wish);
+  });
+  document.querySelectorAll("[data-plan-object]").forEach((button) => {
+    button.onclick = () => {
+      const target = exploreTarget(button.dataset.pool, Number(button.dataset.planObject));
+      if (!target) return;
+      rememberTarget(target);
+      toast(`${target.id} is on the planner. The telescope has not moved.`);
+    };
+  });
+  document.querySelectorAll("[data-open-sky]").forEach((button) => {
+    button.onclick = () => {
+      const target = exploreTarget(button.dataset.pool, Number(button.dataset.openSky));
+      if (!target) return;
+      state.skyPick = { name: target.id, ra: target.ra, dec: target.dec, kind: target.kind, fit: target.fit };
+      state.pendingTarget = target;
+      show("sky");
+    };
+  });
+  document.querySelectorAll("[data-suggest]").forEach((button) => {
+    button.onclick = () => {
+      const target = (state.explorePicks || [])[Number(button.dataset.suggest)];
+      if (!target) return;
+      rememberTarget(target);
+      render();
+    };
+  });
+  document.querySelectorAll("[data-night]").forEach((button) => {
+    button.onclick = () => {
+      state.forecastNight = Number(button.dataset.night);
+      render();
+    };
+  });
+  const refresh = document.querySelector("#forecast-refresh");
+  if (refresh) refresh.onclick = () => guard(() => ensureForecast(true));
+  const planNight = document.querySelector("#plan-my-night");
+  if (planNight) planNight.onclick = () => guard(planMyNight);
+}
+
+function hourRows(hours) {
+  if (!hours.length) return `<p class="muted">No dark hours in this forecast yet.</p>`;
+  return `<table><thead><tr><th>Time</th><th>Score</th><th>Clouds</th><th>Moon</th><th>Humidity</th><th>Wind</th><th>Temp</th></tr></thead><tbody>
+    ${hours.map((hour) => `<tr>
+      <td>${escapeHtml(hour.label)}</td>
+      <td><span class="score-pill ${scoreTone(hour.score)}">${hour.score} ${escapeHtml(scoreTone(hour.score))}</span></td>
+      <td><span class="cloud-meter" style="--cloud:${Math.max(0, Math.min(100, Number(hour.cloud) || 0))}%"></span> ${hour.cloud == null ? "—" : Math.round(hour.cloud) + "%"}</td>
+      <td>${hour.moon_up ? "Up" : "Down"}</td>
+      <td>${hour.humidity == null ? "—" : Math.round(hour.humidity) + "%"}</td>
+      <td>${hour.wind == null ? "—" : Math.round(hour.wind) + " m/s"}</td>
+      <td>${hour.temp == null ? "—" : Math.round(hour.temp) + "°"}</td>
+    </tr>`).join("")}
+  </tbody></table>`;
+}
+
 function planStatus(snap) {
   const plan = (snap && snap.plan) || {};
   const status = plan.status || {};
@@ -1579,31 +2293,53 @@ function planStatus(snap) {
 function renderPlan() {
   const plan = (state.snap && state.snap.plan) || {};
   const safety = plan.safety || { min_battery: 20, min_altitude: 25, stop_before_dawn: true, max_cloud: 80 };
-  const weather = plan.weather || {};
-  const sky = plan.sky || {};
-  const rows = state.planItems.map((item, index) => `
-    <div class="file">
-      <span>${escapeHtml(item.name)} · ${escapeHtml(item.mode)} · ${item.minutes} min${item.rows > 1 || item.cols > 1 ? ` · ${item.rows}×${item.cols}` : ""}</span>
-      <span class="muted">${item.altitude === undefined || item.altitude === null ? "" : item.altitude + "°"}${item.reasons && item.reasons.length ? " · " + escapeHtml(item.reasons[0]) : ""}</span>
+  const { nights, night } = forecastBundle();
+  const suggestions = (state.explorePicks || []).slice(0, 8);
+  const blocks = state.planItems.map((item, index) => `
+    <article class="schedule-block">
+      ${objectArt(item, index)}
+      <div><b>${escapeHtml(item.name)}</b><span class="muted">${item.minutes || 0} min${item.fit ? ` · ${escapeHtml(item.fit)}` : ""}</span></div>
       <button type="button" data-drop="${index}">Remove</button>
-    </div>`).join("");
-  const clouds = weather.cloud_cover === undefined || weather.cloud_cover === null ? "—" : `${weather.cloud_cover}% cloud`;
-  const windowText = weather.window ? ` · clearest ${weather.window}` : "";
-  const dewText = weather.dew_risk ? ` · dew ${weather.dew_risk.toLowerCase()}` : "";
+    </article>`).join("");
   return `
-    <div class="page-head"><h1>Plan</h1><div class="muted" data-field="plan"></div></div>
-    ${banner()}
-    <section class="card">
-      <h2>Tonight</h2>
-      <p>${escapeHtml(sky.note || sky.darkness || "Sky not checked yet.")}${sky.sun_altitude !== undefined && sky.sun_altitude !== null ? ` · sun ${sky.sun_altitude}°` : ""}</p>
-      <p class="muted">${escapeHtml(weather.error || `${clouds}${windowText}${dewText}${weather.wind_speed !== undefined && weather.wind_speed !== null ? ` · wind ${weather.wind_speed} m/s` : ""}${weather.precipitation ? ` · rain ${weather.precipitation} mm` : ""}`)}</p>
-      <div class="actions"><button id="weather" type="button">Refresh sky and weather</button></div>
+    <section class="studio-hero planner-hero">
+      <div class="hero-score">${night ? scoreRing(night.score) : scoreRing(0)}
+        <div>
+          <p class="kicker">Planner</p>
+          <h1>${escapeHtml((night && night.label) || "Tonight")}</h1>
+          <p class="muted">${escapeHtml((night && night.advice) || "Add targets, then run the list when you are at the telescope.")}</p>
+        </div>
+      </div>
+      <button class="primary" id="plan-my-night" type="button">Plan my night</button>
     </section>
-    <form class="card" id="plan-add" style="margin-top:0.8rem">
+    ${banner()}
+    <div class="night-pills">${nights.map((item, index) => `
+      <button type="button" data-night="${index}" class="${index === state.forecastNight ? "primary" : ""}">
+        <span>${escapeHtml(item.day || "")}</span><b>${escapeHtml(item.date || "")}</b><i class="pill-score ${scoreTone(item.score)}"></i>
+      </button>`).join("")}</div>
+    <div class="planner-grid">
+      <aside class="card planner-list">
+        <h2>Targets</h2>
+        <label>Search<input id="plan-query" placeholder="M31, NGC 7000, Orion"></label>
+        <div class="list" id="plan-results"></div>
+        ${suggestions.map((target, index) => `
+          <div class="suggest-row">
+            ${objectArt(target, index)}
+            <div><b>${escapeHtml(target.id)}</b><span class="muted">${escapeHtml(target.kind || "")}${target.peak_altitude ? ` · ${Math.round(target.peak_altitude)}°` : ""}</span></div>
+            ${fitChip(target.fit)}
+            <button type="button" data-suggest="${index}" aria-label="Add ${escapeHtml(target.id)}">+</button>
+          </div>`).join("")}
+      </aside>
+      <section class="card planner-board">
+        <div class="row"><h2>Night schedule</h2><span class="muted" data-field="plan"></span></div>
+        <p class="muted">${night && night.window ? `Clearest ${escapeHtml(night.window)} · dark ${escapeHtml(night.starts || "")}–${escapeHtml(night.ends || "")}` : "The schedule is a plan. The telescope moves only when you run the list."}</p>
+        <div class="schedule">${blocks || `<p class="muted">The night is open. Add a target from the list.</p>`}</div>
+        ${altitudeChart(state.planItems)}
+      </section>
+    </div>
+    <form class="card" id="plan-add">
       <h2>Add a target</h2>
-      <label>Search<input id="plan-query" placeholder="M31, Orion"></label>
-      <div class="list" id="plan-results"></div>
-      <div class="form">
+        <div class="form">
         <label>Name<input name="name" id="plan-name" required></label>
         <label>RA hours<input name="ra" id="plan-ra" required></label>
         <label>Dec °<input name="dec" id="plan-dec" required></label>
@@ -1622,11 +2358,11 @@ function renderPlan() {
         <label>Gain<input name="gain" type="number" value="80"></label>
       </div>
       <label class="row"><input name="autofocus" type="checkbox" checked> Autofocus before each panel</label>
+      <label class="row"><input id="narrowband" type="checkbox"${state.narrowband ? " checked" : ""}> Dual-band filter. Emission nebulae stay available when the Moon is up.</label>
       <div class="actions"><button class="primary" type="submit">Add to the list</button></div>
     </form>
     <section class="card" style="margin-top:0.8rem">
-      <h2>List</h2>
-      <div class="list">${rows || '<div class="muted">No targets yet.</div>'}</div>
+      <h2>When the list runs</h2>
       <label class="row"><input id="park-end" type="checkbox"> Park when the list finishes. This powers the telescope down.</label>
       <div class="form">
         <label>Stop below battery %<input id="min-battery" type="number" min="0" max="100" value="${safety.min_battery ?? 20}"></label>
@@ -1869,9 +2605,44 @@ function tonightDetail(item) {
     : `${item.minutes_above_40} min above 40°`;
   const when = new Date(item.peak_at);
   const clock = Number.isNaN(when.getTime()) ? "" : when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const moon = item.moon_up && item.moon_distance < 40 ? ` · Moon is ${item.moon_distance}° away` : "";
+  const moon = item.moon_note
+    ? ` · ${item.moon_note}`
+    : item.moon_up && item.moon_distance < 40 ? ` · Moon is ${item.moon_distance}° away` : "";
   const magnitude = item.mag === null || item.mag === undefined ? "" : ` · mag ${item.mag}`;
-  return `${item.kind || "Deep sky"}${magnitude} · highest ${item.peak_altitude}° at ${clock} · ${high}${moon}`;
+  const fit = item.fit ? ` · ${item.fit}` : "";
+  const below = item.rises === false ? " · stays below 25° tonight" : "";
+  return `${item.kind || "Deep sky"}${magnitude} · highest ${item.peak_altitude}° at ${clock} · ${high}${fit}${moon}${below}`;
+}
+
+function planNote(item) {
+  const bits = [];
+  if (item.fit) bits.push(item.fit);
+  if (item.altitude !== undefined && item.altitude !== null) bits.push(`${item.altitude}° now`);
+  if (item.moon_note && !(item.reasons || []).includes(item.moon_note)) bits.push(item.moon_note);
+  (item.reasons || []).forEach((reason) => bits.push(reason));
+  return bits.join(" · ");
+}
+
+function targetFit(target) {
+  const bits = [target.kind];
+  if (target.altitude !== undefined && target.altitude !== null) bits.push(`${Math.round(target.altitude)}° now`);
+  if (target.rises === false) bits.push("stays below 25° tonight");
+  else if (target.peak_altitude) bits.push(`highest ${target.peak_altitude}°`);
+  if (target.fit) bits.push(target.fit);
+  if (target.moon_note) bits.push(target.moon_note);
+  return bits.filter(Boolean).join(" · ");
+}
+
+function catalogUrl(query) {
+  const params = new URLSearchParams({ q: query || "" });
+  const here = placeNow(state.snap || {});
+  if (here) {
+    params.set("lat", String(here.latitude));
+    params.set("lon", String(here.longitude));
+  }
+  if (state.narrowband) params.set("narrowband", "1");
+  if (state.snap && state.snap.model) params.set("model", state.snap.model);
+  return `/api/catalog?${params}`;
 }
 
 async function loadBestTonight() {
@@ -1882,7 +2653,10 @@ async function loadBestTonight() {
   }
   const lat = here.latitude;
   const lon = here.longitude;
-  const data = await api(`/api/sky/tonight?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+  const params = new URLSearchParams({ lat, lon });
+  if (state.narrowband) params.set("narrowband", "1");
+  if (state.snap && state.snap.model) params.set("model", state.snap.model);
+  const data = await api(`/api/sky/tonight?${params}`);
   const card = document.querySelector("#tonight-card");
   const note = document.querySelector("#tonight-note");
   const list = document.querySelector("#best-list");
@@ -2056,6 +2830,17 @@ function bind() {
     };
     fillTargets();
   }
+  const pending = state.pendingTarget;
+  if (pending && document.querySelector("#target-name")) {
+    state.pendingTarget = null;
+    document.querySelector("#target-name").value = pending.id || pending.name || "";
+    document.querySelector("#target-ra").value = pending.ra;
+    document.querySelector("#target-dec").value = pending.dec;
+    const title = document.querySelector("#sky-pick-name");
+    const detail = document.querySelector("#sky-pick-detail");
+    if (title) title.textContent = `${pending.id || ""} ${pending.name || ""}`.trim();
+    if (detail) detail.textContent = targetFit(pending);
+  }
   const form = document.querySelector("#goto");
   if (form) form.onsubmit = (event) => {
     event.preventDefault();
@@ -2077,6 +2862,7 @@ function bind() {
   bindClick("#star-depth", () => chooseStarDepth());
   bindClick("#sky-pictures", () => chooseSkyPictures());
   bindClick("#best-tonight", () => guard(loadBestTonight));
+  bindNarrowband();
   bindClick("#sky-view", () => {
     const pick = state.skyPick;
     if (!pick) return;
@@ -2271,6 +3057,7 @@ function bind() {
     post("/wifi", { action: "join", ssid: data.ssid, password: data.password || "" });
   };
   bindPlan();
+  bindStudio();
   const imaging = document.querySelector("#imaging");
   if (imaging) imaging.onsubmit = (event) => {
     event.preventDefault();
@@ -2299,6 +3086,7 @@ function planPayload(action) {
       min_altitude: Number(document.querySelector("#min-altitude")?.value ?? 25),
       max_cloud: Number(document.querySelector("#max-cloud")?.value ?? 80),
       stop_before_dawn: document.querySelector("#stop-dawn")?.checked !== false,
+      narrowband: state.narrowband,
     },
   };
 }
@@ -2326,6 +3114,11 @@ function bindPlan() {
       overlap: Number(data.overlap),
       gain: Number(data.gain),
       autofocus: add.autofocus.checked,
+      kind: add.dataset.kind || "",
+      size_arcmin: add.dataset.size || "",
+      fit: add.dataset.fit || "",
+      curve: parseCurve(add.dataset.curve),
+      peak_altitude: add.dataset.peak ? Number(add.dataset.peak) : undefined,
     });
     render();
   };
@@ -2347,12 +3140,12 @@ function bindPlan() {
   }));
   const query = document.querySelector("#plan-query");
   if (query) query.oninput = () => guard(async () => {
-    const data = await api(`/api/catalog?q=${encodeURIComponent(query.value)}`);
+    const data = await api(catalogUrl(query.value));
     const box = document.querySelector("#plan-results");
     if (!box) return;
     const targets = data.targets.slice(0, 6);
     box.innerHTML = targets.map((target, index) =>
-      `<button type="button" data-plan-target="${index}">${escapeHtml(target.id)} ${escapeHtml(target.name)}</button>`
+      `<button type="button" data-plan-target="${index}"><span>${escapeHtml(target.id)} ${escapeHtml(target.name)}</span><span class="muted">${escapeHtml(targetFit(target))}</span></button>`
     ).join("");
     box.querySelectorAll("[data-plan-target]").forEach((button) => {
       button.onclick = () => {
@@ -2360,9 +3153,28 @@ function bindPlan() {
         document.querySelector("#plan-name").value = target.id;
         document.querySelector("#plan-ra").value = target.ra;
         document.querySelector("#plan-dec").value = target.dec;
+        add.dataset.kind = target.kind || "";
+        add.dataset.size = target.size_arcmin ?? "";
+        add.dataset.fit = target.fit || "";
+        add.dataset.curve = JSON.stringify(target.curve || []);
+        add.dataset.peak = target.peak_altitude ?? "";
+        if ((target.fit_rows > 1 || target.fit_cols > 1) && Number(add.rows.value) === 1 && Number(add.cols.value) === 1) {
+          add.rows.value = target.fit_rows;
+          add.cols.value = target.fit_cols;
+        }
       };
     });
   });
+  bindNarrowband();
+}
+
+function bindNarrowband() {
+  const box = document.querySelector("#narrowband");
+  if (!box) return;
+  box.onchange = () => {
+    state.narrowband = box.checked;
+    localStorage.setItem("seestar-narrowband", box.checked ? "1" : "0");
+  };
 }
 
 function bindClick(selector, action) {
@@ -2529,10 +3341,10 @@ function bindPad(pad) {
 async function fillTargets() {
   const box = document.querySelector("#results");
   if (!box) return;
-  const data = await api(`/api/catalog?q=${encodeURIComponent(state.query)}`);
+  const data = await api(catalogUrl(state.query));
   state.targets = data.targets.slice(0, 8);
   box.innerHTML = state.targets.map((target, index) =>
-    `<button type="button" data-target="${index}"><span>${escapeHtml(target.id)} ${escapeHtml(target.name)}</span><span class="muted">${escapeHtml(target.kind)}</span></button>`
+    `<button type="button" data-target="${index}"><span>${escapeHtml(target.id)} ${escapeHtml(target.name)}</span><span class="muted">${escapeHtml(targetFit(target))}</span></button>`
   ).join("");
   box.querySelectorAll("[data-target]").forEach((button) => {
     button.onclick = () => {

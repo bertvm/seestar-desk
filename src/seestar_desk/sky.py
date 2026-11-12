@@ -82,6 +82,101 @@ def field_of_view(model: str) -> tuple[float, float]:
     return 1.29, 0.72
 
 
+def is_emission(kind: str) -> bool:
+    text = (kind or "").lower()
+    return "nebula" in text and "planetary" not in text
+
+
+def moon_limit(kind: str, narrowband: bool) -> float:
+    """Degrees from the Moon that still spoil the picture. A dual-band filter keeps emission nebulae."""
+    if narrowband and is_emission(kind):
+        return 12.0
+    return 40.0
+
+
+def frame_fit(size_arcmin: float | None, model: str) -> dict[str, Any] | None:
+    """Say whether the object's long side fits the telephoto frame."""
+    if size_arcmin is None:
+        return None
+    long_arcmin = max(field_of_view(model)) * 60.0
+    if long_arcmin <= 0:
+        return None
+    ratio = float(size_arcmin) / long_arcmin
+    if ratio < 0.12:
+        return {"fit": "Tiny in the frame", "fit_rows": 1, "fit_cols": 1}
+    if ratio <= 0.75:
+        return {"fit": "Fits the frame", "fit_rows": 1, "fit_cols": 1}
+    if ratio <= 1.15:
+        return {"fit": "A tight crop", "fit_rows": 1, "fit_cols": 1}
+    span = float(size_arcmin) / (long_arcmin * 0.8)
+    count = max(2, math.ceil(span))
+    cols = math.ceil(math.sqrt(count))
+    rows = math.ceil(count / cols)
+    return {"fit": f"Needs a {rows}×{cols} mosaic", "fit_rows": rows, "fit_cols": cols}
+
+
+def moon_advice(kind: str, separation: float, moon_up: bool, narrowband: bool) -> str:
+    if not moon_up:
+        return ""
+    limit = moon_limit(kind, narrowband)
+    if separation >= limit:
+        if narrowband and is_emission(kind) and separation < 40:
+            return f"The Moon is {separation:.0f}° away. The dual-band filter still suits this nebula."
+        return ""
+    return f"The Moon is {separation:.0f}° away."
+
+
+def _night_samples(lat_deg: float, lon_deg: float, moment: datetime) -> list[datetime]:
+    window = _dark_window(lat_deg, lon_deg, moment)
+    if window is None:
+        start, end = moment, moment + timedelta(hours=16)
+    else:
+        start, end = window[0], window[1]
+    times = [moment]
+    cursor = start
+    while cursor <= end:
+        times.append(cursor)
+        cursor += timedelta(minutes=30)
+    return times
+
+
+def describe_target(
+    target: dict[str, Any],
+    lat_deg: float,
+    lon_deg: float,
+    moment: datetime | None = None,
+    model: str = "",
+    narrowband: bool = False,
+) -> dict[str, Any]:
+    """Altitude tonight, frame fit, and whether the Moon gets in the way."""
+    moment = _aware(moment or datetime.now(timezone.utc))
+    copy = dict(target)
+    times = _night_samples(lat_deg, lon_deg, moment)
+    altitudes = [alt_az(float(target["ra"]), float(target["dec"]), lat_deg, lon_deg, sample)[0] for sample in times]
+    peak = max(altitudes)
+    now = alt_az(float(target["ra"]), float(target["dec"]), lat_deg, lon_deg, moment)[0]
+    peak_index = altitudes.index(peak)
+    moon_ra, moon_dec = moon_equatorial(times[peak_index])
+    moon_alt, _moon_az = alt_az(moon_ra, moon_dec, lat_deg, lon_deg, times[peak_index])
+    separation = angular_distance(float(target["ra"]), float(target["dec"]), moon_ra, moon_dec)
+    kind = str(target.get("kind") or "")
+    fitted = frame_fit(target.get("size_arcmin"), model)
+    copy.update(
+        {
+            "altitude": round(now, 1),
+            "peak_altitude": round(peak, 1),
+            "rises": peak >= 25,
+            "moon_distance": round(separation, 0),
+            "moon_up": moon_alt > 0,
+            "moon_note": moon_advice(kind, separation, moon_alt > 0, narrowband),
+            "curve": altitude_curve(altitudes),
+        }
+    )
+    if fitted:
+        copy.update(fitted)
+    return copy
+
+
 def mosaic_centers(
     ra_hours: float,
     dec_deg: float,
@@ -133,6 +228,40 @@ def moon_equatorial(moment: datetime) -> tuple[float, float]:
     return (math.degrees(ra) / 15.0) % 24.0, math.degrees(declination)
 
 
+def moon_sketch(moment: datetime | None = None) -> dict[str, Any]:
+    """Moon phase from the synodic month. Illumination runs from 0 at new to 1 at full."""
+    moment = _aware(moment or datetime.now(timezone.utc))
+    synodic = 29.530588853
+    known = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
+    age = ((moment - known).total_seconds() / 86400.0) % synodic
+    phase = age / synodic
+    illumination = (1.0 - math.cos(2.0 * math.pi * phase)) / 2.0
+    if phase < 0.03 or phase > 0.97:
+        name = "New Moon"
+    elif phase < 0.22:
+        name = "Waxing crescent"
+    elif phase < 0.28:
+        name = "First quarter"
+    elif phase < 0.47:
+        name = "Waxing gibbous"
+    elif phase < 0.53:
+        name = "Full Moon"
+    elif phase < 0.72:
+        name = "Waning gibbous"
+    elif phase < 0.78:
+        name = "Last quarter"
+    else:
+        name = "Waning crescent"
+    return {"name": name, "illumination": round(illumination, 2), "waxing": phase < 0.5, "age_days": round(age, 1)}
+
+
+def altitude_curve(altitudes: list[float]) -> list[float]:
+    if not altitudes:
+        return []
+    step = max(1, len(altitudes) // 14)
+    return [round(altitudes[index], 0) for index in range(0, len(altitudes), step)][:16]
+
+
 def angular_distance(ra1: float, dec1: float, ra2: float, dec2: float) -> float:
     """Separation in degrees between two equatorial positions. RA is in hours."""
     first_ra = math.radians(ra1 * 15.0)
@@ -164,7 +293,14 @@ def _dark_window(lat_deg: float, lon_deg: float, moment: datetime) -> tuple[date
     return None
 
 
-def best_tonight(lat_deg: float, lon_deg: float, moment: datetime | None = None, limit: int = 5) -> dict[str, Any]:
+def best_tonight(
+    lat_deg: float,
+    lon_deg: float,
+    moment: datetime | None = None,
+    limit: int = 5,
+    model: str = "",
+    narrowband: bool = False,
+) -> dict[str, Any]:
     """Rank catalog objects by how high and how long they stay up in the coming dark hours."""
     from seestar_desk.catalog import targets
 
@@ -189,25 +325,37 @@ def best_tonight(lat_deg: float, lon_deg: float, moment: datetime | None = None,
         if peak < 35:
             continue
         peak_index = altitudes.index(peak)
+        now_alt = alt_az(float(target["ra"]), float(target["dec"]), lat_deg, lon_deg, moment)[0]
         minutes_high = sum(step_minutes for altitude in altitudes if altitude >= 40)
         magnitude = float(target["mag"]) if target["mag"] is not None else 9.0
         moon_ra, moon_dec, moon_alt, _moon_az = moon_places[peak_index]
         separation = angular_distance(float(target["ra"]), float(target["dec"]), moon_ra, moon_dec)
-        moon_penalty = (40.0 - separation) / 10.0 if moon_alt > 0 and separation < 40 else 0.0
+        kind = str(target.get("kind") or "")
+        near = moon_limit(kind, narrowband)
+        moon_penalty = (near - separation) / 10.0 if moon_alt > 0 and separation < near else 0.0
         score = (minutes_high / 60.0) * 3.0 + peak / 15.0 + max(0.0, 8.0 - magnitude) * 0.5 - moon_penalty
+        fitted = frame_fit(target.get("size_arcmin"), model) or {}
         ranked.append(
             {
                 "id": target["id"],
                 "name": target["name"],
-                "kind": target["kind"],
+                "kind": kind,
                 "ra": target["ra"],
                 "dec": target["dec"],
                 "mag": target["mag"],
+                "size_arcmin": target.get("size_arcmin"),
+                "altitude": round(now_alt, 1),
+                "rises": peak >= 25,
                 "peak_altitude": round(peak, 1),
                 "peak_at": times[peak_index].isoformat().replace("+00:00", "Z"),
                 "minutes_above_40": int(round(minutes_high)),
                 "moon_distance": round(separation, 0),
                 "moon_up": moon_alt > 0,
+                "moon_note": moon_advice(kind, separation, moon_alt > 0, narrowband),
+                "fit": fitted.get("fit", ""),
+                "fit_rows": fitted.get("fit_rows", 1),
+                "fit_cols": fitted.get("fit_cols", 1),
+                "curve": altitude_curve(altitudes),
                 "score": round(score, 2),
             }
         )
