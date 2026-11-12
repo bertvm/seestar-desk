@@ -2290,17 +2290,93 @@ function planStatus(snap) {
   return [status.step, status.detail, sky.darkness].filter(Boolean).join(" · ") || "Idle";
 }
 
+function clockMinutes(text) {
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(text || ""));
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function clockText(minutes) {
+  const day = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(day / 60)).padStart(2, "0")}:${String(day % 60).padStart(2, "0")}`;
+}
+
+function planSchedule(items, night) {
+  let start = clockMinutes(night && night.starts);
+  let end = clockMinutes(night && night.ends);
+  if (start === null) start = 22 * 60;
+  if (end === null) end = start + 8 * 60;
+  if (end <= start) end += 1440;
+  const slots = [];
+  let cursor = start;
+  items.forEach((item, index) => {
+    const minutes = Math.max(0, Number(item.minutes) || 0);
+    const wait = Math.max(0, Number(item.wait) || 0);
+    const slotStart = cursor + wait;
+    slots.push({ item, index, start: slotStart, end: slotStart + minutes, minutes, wait });
+    cursor = slotStart + minutes;
+  });
+  end = Math.max(end, cursor, start + 60);
+  const span = end - start;
+  const marks = [];
+  for (let tick = Math.ceil(start / 60) * 60; tick <= end; tick += 60) marks.push(tick);
+  const at = (minute) => ((minute - start) / span) * 100;
+  return { start, end, span, slots, marks, at };
+}
+
+function planRail(schedule) {
+  const height = Math.max(360, Math.round(schedule.span * 1.7));
+  const marks = schedule.marks.map((tick) => `<span style="top:${schedule.at(tick)}%">${clockText(tick)}</span>`).join("");
+  const cards = schedule.slots.map((slot) => {
+    const high = Number(slot.item.peak_altitude);
+    const now = Number(slot.item.altitude);
+    const heightText = Number.isFinite(high) ? `${Math.round(now || 0)}–${Math.round(high)}°` : "";
+    const tone = `hsl(${(slot.index * 68) % 360}, 52%, 58%)`;
+    return `
+      <article class="plan-card" data-order="${slot.index}" data-start="${slot.start}" title="Drag to a later time, or onto another object" style="top:${schedule.at(slot.start)}%; height:${Math.max(7, (slot.minutes / schedule.span) * 100)}%; --tone:${tone}">
+        ${objectArt(slot.item, slot.index)}
+        <div>
+          <b>${escapeHtml(slot.item.name)}</b>
+          <span data-minutes>${clockText(slot.start)}–${clockText(slot.end)} · ${slot.minutes} min</span>
+          <span>${[heightText, slot.item.fit].filter(Boolean).map((part) => escapeHtml(part)).join(" · ")}</span>
+        </div>
+        <button type="button" data-drop="${slot.index}" aria-label="Remove ${escapeHtml(slot.item.name)}">×</button>
+        <i class="plan-resize" data-resize="${slot.index}" data-axis="y" title="Drag to change how long this runs"></i>
+      </article>`;
+  }).join("");
+  return `
+    <div class="plan-scale" data-span="${schedule.span}" data-start="${schedule.start}" style="height:${height}px">
+      <div class="plan-hours">${marks}</div>
+      <div class="plan-track">${cards || `<p class="muted">Nothing planned yet. Add a target from the list.</p>`}</div>
+    </div>`;
+}
+
+function planTimeline(schedule) {
+  const marks = schedule.marks.map((tick) => `<span style="left:${schedule.at(tick)}%">${clockText(tick)}</span>`).join("");
+  const blocks = schedule.slots.map((slot) => {
+    const tone = `hsl(${(slot.index * 68) % 360}, 52%, 58%)`;
+    const width = Math.max(4, (slot.minutes / schedule.span) * 100);
+    return `
+      <article class="timeline-block" data-order="${slot.index}" data-start="${slot.start}" title="Drag to a later time, or onto another object" style="left:${schedule.at(slot.start)}%; width:${width}%; --tone:${tone}">
+        ${objectArt(slot.item, slot.index)}
+        <div><b>${escapeHtml(slot.item.name)}</b><span data-minutes>${clockText(slot.start)}–${clockText(slot.end)}</span></div>
+        <i class="plan-resize" data-resize="${slot.index}" data-axis="x" title="Drag to change how long this runs"></i>
+      </article>`;
+  }).join("");
+  return `
+    <section class="plan-timeline" aria-label="Night timeline">
+      <div class="row"><h2>Timeline</h2><span class="muted">${clockText(schedule.start)}–${clockText(schedule.end)}</span></div>
+      <div class="timeline-scale">${marks}</div>
+      <div class="timeline-lane" data-span="${schedule.span}" data-start="${schedule.start}">${blocks || `<p class="muted">The night is open.</p>`}</div>
+    </section>`;
+}
+
 function renderPlan() {
   const plan = (state.snap && state.snap.plan) || {};
   const safety = plan.safety || { min_battery: 20, min_altitude: 25, stop_before_dawn: true, max_cloud: 80 };
   const { nights, night } = forecastBundle();
   const suggestions = (state.explorePicks || []).slice(0, 8);
-  const blocks = state.planItems.map((item, index) => `
-    <article class="schedule-block">
-      ${objectArt(item, index)}
-      <div><b>${escapeHtml(item.name)}</b><span class="muted">${item.minutes || 0} min${item.fit ? ` · ${escapeHtml(item.fit)}` : ""}</span></div>
-      <button type="button" data-drop="${index}">Remove</button>
-    </article>`).join("");
+  const schedule = planSchedule(state.planItems, night);
   return `
     <section class="studio-hero planner-hero">
       <div class="hero-score">${night ? scoreRing(night.score) : scoreRing(0)}
@@ -2318,8 +2394,8 @@ function renderPlan() {
         <span>${escapeHtml(item.day || "")}</span><b>${escapeHtml(item.date || "")}</b><i class="pill-score ${scoreTone(item.score)}"></i>
       </button>`).join("")}</div>
     <div class="planner-grid">
-      <aside class="card planner-list">
-        <h2>Targets</h2>
+      <section class="card planner-list">
+        <div class="row"><h2>Targets</h2><span class="muted" data-field="plan"></span></div>
         <label>Search<input id="plan-query" placeholder="M31, NGC 7000, Orion"></label>
         <div class="list" id="plan-results"></div>
         ${suggestions.map((target, index) => `
@@ -2329,14 +2405,17 @@ function renderPlan() {
             ${fitChip(target.fit)}
             <button type="button" data-suggest="${index}" aria-label="Add ${escapeHtml(target.id)}">+</button>
           </div>`).join("")}
-      </aside>
-      <section class="card planner-board">
-        <div class="row"><h2>Night schedule</h2><span class="muted" data-field="plan"></span></div>
-        <p class="muted">${night && night.window ? `Clearest ${escapeHtml(night.window)} · dark ${escapeHtml(night.starts || "")}–${escapeHtml(night.ends || "")}` : "The schedule is a plan. The telescope moves only when you run the list."}</p>
-        <div class="schedule">${blocks || `<p class="muted">The night is open. Add a target from the list.</p>`}</div>
         ${altitudeChart(state.planItems)}
       </section>
+      <aside class="plan-rail" aria-label="Planned objects">
+        <div class="plan-rail-head">
+          <h2>Planned</h2>
+          <span>${night && night.starts ? `${escapeHtml(night.starts)}–${escapeHtml(night.ends || "")}` : "Tonight"}</span>
+        </div>
+        <div class="plan-rail-list">${planRail(schedule)}</div>
+      </aside>
     </div>
+    ${planTimeline(schedule)}
     <form class="card" id="plan-add">
       <h2>Add a target</h2>
         <div class="form">
@@ -3098,6 +3177,35 @@ async function runPlan(start) {
   else paintMeters();
 }
 
+function droppedMinute(card, track, vertical) {
+  const box = track.getBoundingClientRect();
+  const rect = card.getBoundingClientRect();
+  const span = Number(track.dataset.span) || 1;
+  const nightStart = Number(track.dataset.start) || 0;
+  const ratio = vertical ? (rect.top - box.top) / box.height : (rect.left - box.left) / box.width;
+  const minute = nightStart + Math.min(1, Math.max(0, ratio)) * span;
+  return Math.round(minute / 5) * 5;
+}
+
+function placeDraggedPlan(card, from, insert, vertical) {
+  const track = card.closest(vertical ? ".plan-scale" : ".timeline-lane");
+  if (!track) return;
+  const dropped = droppedMinute(card, track, vertical);
+  const reordered = insert !== from && insert !== from + 1;
+  const placed = reordered ? (insert > from ? insert - 1 : insert) : from;
+  if (!reordered && Math.abs(dropped - Number(card.dataset.start)) < 5) return;
+  let item = state.planItems[from];
+  if (reordered) {
+    [item] = state.planItems.splice(from, 1);
+    state.planItems.splice(placed, 0, item);
+  }
+  const earlier = planSchedule(state.planItems.slice(0, placed), forecastBundle().night);
+  const previousEnd = earlier.slots.length ? earlier.slots[earlier.slots.length - 1].end : earlier.start;
+  const wait = Math.max(0, dropped - previousEnd);
+  if (wait >= 5) item.wait = wait;
+  else delete item.wait;
+}
+
 function bindPlan() {
   const add = document.querySelector("#plan-add");
   if (add) add.onsubmit = (event) => {
@@ -3126,6 +3234,86 @@ function bindPlan() {
     button.onclick = () => {
       state.planItems.splice(Number(button.dataset.drop), 1);
       render();
+    };
+  });
+  document.querySelectorAll(".plan-card, .timeline-block").forEach((card) => {
+    card.onpointerdown = (event) => {
+      if (event.target.closest("[data-resize], button")) return;
+      event.preventDefault();
+      const from = Number(card.dataset.order);
+      const vertical = card.classList.contains("plan-card");
+      const origin = vertical ? event.clientY : event.clientX;
+      let moved = false;
+      let insert = from;
+      card.classList.add("dragging");
+      const move = (ev) => {
+        const point = vertical ? ev.clientY : ev.clientX;
+        const delta = point - origin;
+        if (Math.abs(delta) > 4) moved = true;
+        card.style.transform = vertical ? `translateY(${delta}px)` : `translateX(${delta}px)`;
+        const siblings = [...document.querySelectorAll(vertical ? ".plan-card" : ".timeline-block")];
+        insert = 0;
+        siblings.forEach((other) => {
+          if (other === card) return;
+          const box = other.getBoundingClientRect();
+          const mid = vertical ? box.top + box.height / 2 : box.left + box.width / 2;
+          if (point > mid) insert = Math.max(insert, Number(other.dataset.order) + 1);
+        });
+        const reordering = insert !== from && insert !== from + 1;
+        siblings.forEach((other) => {
+          const index = Number(other.dataset.order);
+          other.classList.toggle("drop-target", reordering && other !== card && index === (insert > from ? insert - 1 : insert));
+        });
+        const label = card.querySelector("[data-minutes]");
+        const track = card.closest(vertical ? ".plan-scale" : ".timeline-lane");
+        if (label && track) {
+          const dropped = droppedMinute(card, track, vertical);
+          const minutes = Number(state.planItems[from].minutes) || 0;
+          const text = `${clockText(dropped)}–${clockText(dropped + minutes)}`;
+          label.textContent = vertical ? `${text} · ${minutes} min` : text;
+        }
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        if (moved) placeDraggedPlan(card, from, insert, vertical);
+        render();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    };
+  });
+  document.querySelectorAll("[data-resize]").forEach((handle) => {
+    handle.onpointerdown = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const index = Number(handle.dataset.resize);
+      const item = state.planItems[index];
+      const across = handle.dataset.axis === "x";
+      const track = document.querySelector(across ? ".timeline-lane" : ".plan-scale");
+      if (!item || !track) return;
+      const span = Number(track.dataset.span) || 1;
+      const size = across ? track.getBoundingClientRect().width : track.getBoundingClientRect().height;
+      const origin = across ? event.clientX : event.clientY;
+      const startMinutes = Number(item.minutes) || 0;
+      const card = handle.closest("article");
+      const move = (ev) => {
+        const delta = (across ? ev.clientX : ev.clientY) - origin;
+        const minutes = Math.max(5, Math.min(360, Math.round((startMinutes + (delta / size) * span) / 5) * 5));
+        item.minutes = minutes;
+        if (!card) return;
+        if (across) card.style.width = `${(minutes / span) * 100}%`;
+        else card.style.height = `${(minutes / span) * size}px`;
+        const label = card.querySelector("[data-minutes]");
+        if (label) label.textContent = across ? `${minutes} min` : label.textContent.replace(/·\s*\d+\s*min/, `· ${minutes} min`);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        render();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
     };
   });
   bindClick("#plan-start", () => runPlan(true));

@@ -1238,10 +1238,114 @@ button.wide {
 .hour-table th, .hour-table td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--line); font-size: 0.85rem; }
 .cloud-meter { display: inline-block; width: 72px; height: 6px; border-radius: 99px; background: linear-gradient(90deg, var(--good) var(--cloud), var(--track) var(--cloud)); vertical-align: middle; }
 
-.planner-grid { display: grid; grid-template-columns: minmax(260px, 340px) 1fr; gap: 0.8rem; }
+.planner-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 360px); gap: 0.8rem; align-items: start; }
 .suggest-row, .schedule-block { display: grid; grid-template-columns: 72px 1fr auto auto; gap: 0.55rem; align-items: center; padding: 0.35rem 0; }
 .suggest-row .art, .schedule-block .art { height: 72px; width: 108px; border-radius: 0.45rem; object-fit: cover; }
-.schedule { display: grid; gap: 0.35rem; }
+.plan-rail {
+  background: #070b12;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 0.85rem;
+  min-height: 420px;
+}
+.plan-rail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; margin-bottom: 0.7rem; }
+.plan-rail-head h2 { margin: 0; }
+.plan-rail-head span, .plan-card span { color: rgba(232, 237, 244, 0.62); font-size: 0.78rem; }
+.plan-rail-list { max-height: 640px; overflow: auto; }
+.plan-scale { display: grid; grid-template-columns: 3rem minmax(0, 1fr); }
+.plan-hours, .plan-track { position: relative; }
+.plan-hours span, .timeline-scale span {
+  position: absolute;
+  color: rgba(232, 237, 244, 0.55);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.plan-hours span { right: 0.35rem; transform: translateY(-50%); }
+.plan-track { border-left: 1px solid rgba(255, 255, 255, 0.16); }
+.plan-card {
+  position: absolute;
+  left: 0.4rem;
+  right: 0.15rem;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 0.4rem;
+  align-items: center;
+  padding: 0.3rem 0.4rem;
+  overflow: hidden;
+  border-radius: 0.7rem;
+  background: rgba(15, 23, 36, 0.94);
+  border-left: 4px solid var(--tone, var(--good));
+  color: #e8edf4;
+  cursor: grab;
+  touch-action: none;
+}
+.plan-timeline {
+  margin-top: 0.8rem;
+  background: #070b12;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  padding: 0.85rem 1rem 1rem;
+}
+.plan-timeline h2 { margin: 0; }
+.timeline-scale { position: relative; height: 1.5rem; margin: 0.4rem 0.4rem 0; }
+.timeline-scale span { transform: translateX(-50%); }
+.timeline-lane {
+  position: relative;
+  height: 76px;
+  margin: 0 0.4rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+}
+.timeline-block {
+  position: absolute;
+  top: 10px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  overflow: hidden;
+  padding: 0 0.4rem;
+  border-radius: 0.6rem;
+  background: rgba(15, 23, 36, 0.94);
+  border-top: 3px solid var(--tone, var(--accent));
+  color: #e8edf4;
+  cursor: grab;
+  touch-action: none;
+}
+.plan-card.dragging, .timeline-block.dragging {
+  z-index: 4;
+  cursor: grabbing;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+}
+.plan-card.drop-target, .timeline-block.drop-target { outline: 2px solid rgba(255, 255, 255, 0.7); }
+.timeline-block .art { width: 40px; height: 40px; border-radius: 0.35rem; object-fit: cover; }
+.timeline-block b, .timeline-block span { display: block; white-space: nowrap; }
+.timeline-block span { color: rgba(232, 237, 244, 0.62); font-size: 0.72rem; }
+.plan-card .art { width: 42px; height: 36px; border-radius: 0.35rem; object-fit: cover; }
+.plan-card b, .plan-card span { display: block; }
+.plan-card b { font-size: 0.92rem; }
+.plan-card button {
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 999px;
+  border: 0;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+}
+.plan-resize {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+}
+.plan-card .plan-resize { left: 0; right: 0; bottom: 0; height: 8px; cursor: ns-resize; }
+.timeline-block .plan-resize { top: 0; right: 0; bottom: 0; width: 8px; cursor: ew-resize; }
+.plan-card .plan-resize::after, .timeline-block .plan-resize::after {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.45);
+  border-radius: 99px;
+}
+.plan-card .plan-resize::after { left: 30%; right: 30%; bottom: 2px; height: 3px; }
+.timeline-block .plan-resize::after { top: 25%; bottom: 25%; right: 2px; width: 3px; }
 .alt-chart { width: 100%; height: 150px; background: var(--bg-sink); border-radius: 0.7rem; margin-top: 0.6rem; }
 .alt-limit { stroke: var(--bad); stroke-dasharray: 4 4; stroke-width: 1; }
 #plan-add { margin-top: 0.8rem; }

@@ -122,6 +122,14 @@ class NightPlan:
                     self.status["detail"] = f"Skipped {item['name']}: {reasons[0]}"
                     await self.session._note(self.status["detail"])
                     continue
+                wait = max(0.0, float(item.get("wait") or 0))
+                if wait and not self._stop:
+                    self.status["step"] = "waiting"
+                    self.status["detail"] = f"Waiting {wait:g} min before {item['name']}"
+                    await self.session._emit("state", self.session.snapshot())
+                    await self._pause(wait * 60.0)
+                if self._stop:
+                    break
                 if item["mode"] in {"planet", "moon", "scenery"}:
                     await self._record(item)
                 else:
@@ -184,6 +192,13 @@ class NightPlan:
         await self.session.start_video(item["mode"], None)
         await self._expose(float(item["minutes"]) * 60.0, item)
         await self.session.stop()
+
+    async def _pause(self, seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < deadline:
+            if self._stop:
+                return
+            await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
 
     async def _expose(self, seconds: float, item: dict[str, Any]) -> None:
         deadline = time.monotonic() + max(0.0, seconds)
@@ -289,6 +304,7 @@ def _clean_item(item: dict[str, Any], model: Any) -> dict[str, Any]:
         "rows": max(1, int(item.get("rows") or 1)),
         "cols": max(1, int(item.get("cols") or 1)),
         "overlap": float(item.get("overlap") if item.get("overlap") is not None else 20),
+        "wait": max(0.0, float(item.get("wait") or 0)),
         "fov_ra": float(item.get("fov_ra") or fov_ra),
         "fov_dec": float(item.get("fov_dec") or fov_dec),
     }
