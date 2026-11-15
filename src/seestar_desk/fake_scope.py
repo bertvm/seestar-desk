@@ -51,6 +51,7 @@ class FakeScope:
         self.equatorial = False
         self.parked = False
         self.park_refusals = 0
+        self.folder_files: list[dict[str, Any]] | None = None
         self.stacking = False
         self.cam_id = 0
         self.settings: dict[str, Any] = {
@@ -196,6 +197,14 @@ class FakeScope:
             return _fail(command_id, method, 210, "not supported")
         if not (self.master or self.master_unsupported) and method not in READ_ONLY:
             return _fail(command_id, method, 403, "guest mode: another app has control")
+        if method == "get_img_file_info":
+            path = str(params or "")
+            name = path.rsplit("/", 1)[-1]
+            known = {str(item.get("name") or "") for item in (self.folder_files or [])}
+            known.update({"stacked.jpg", "stacked_thn.jpg"})
+            if name not in known:
+                return _fail(command_id, method, 255, "file not exist")
+            return _ok(command_id, method, {"size_k": 4, "date": ""})
         if method == "scope_park" and self.park_refusals > 0:
             self.park_refusals -= 1
             return _fail(command_id, method, 203, "equipment is moving")
@@ -369,6 +378,8 @@ class FakeScope:
         if method == "get_img_file_page_number":
             return 1
         if method == "get_img_file_page_name":
+            if self.folder_files is not None:
+                return self.folder_files
             return [
                 {"name": "stacked.jpg", "size_k": 12, "date": "2026-11-07", "is_dir": False},
                 {"name": "stacked_thn.jpg", "size_k": 4, "date": "2026-11-07", "is_dir": False},

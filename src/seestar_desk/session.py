@@ -35,6 +35,7 @@ GUEST_OK = {
     "get_albums",
     "get_img_file_page_number",
     "get_img_file_page_name",
+    "get_img_file_info",
     "pi_get_time",
     "pi_is_verified",
     "pi_station_state",
@@ -215,9 +216,9 @@ class ScopeSession:
             pass
         await self._note("Signed in with the current app handshake.")
 
-    async def command(self, method: str, params: Any = None, timeout: float = 8) -> dict[str, Any]:
+    async def command(self, method: str, params: Any = None, timeout: float = 8, *, quiet: bool = False) -> dict[str, Any]:
         async with self._write_lock:
-            return await self._roundtrip(method, params, timeout)
+            return await self._roundtrip(method, params, timeout, quiet=quiet)
 
     async def claim(self) -> dict[str, Any]:
         try:
@@ -700,7 +701,7 @@ class ScopeSession:
             },
         )
 
-    async def _roundtrip(self, method: str, params: Any, timeout: float) -> dict[str, Any]:
+    async def _roundtrip(self, method: str, params: Any, timeout: float, quiet: bool = False) -> dict[str, Any]:
         self._ensure()
         response = await self._send(method, params, timeout, self._verify)
         if _verify_mismatch(response, self._verify):
@@ -711,12 +712,14 @@ class ScopeSession:
             response = await self._send(method, params, timeout, self._verify)
         error = response_error(response)
         if error:
-            self.state["last_error"] = f"{method}: {error}"
+            text = f"{method}: {error}"
             if "guest" in error.lower() or "master" in error.lower():
                 self.master = False
                 self.state["master"] = False
-            await self._emit("state", self.snapshot())
-            raise ScopeError(self.state["last_error"], response)
+            if not quiet:
+                self.state["last_error"] = text
+                await self._emit("state", self.snapshot())
+            raise ScopeError(text, response)
         self._absorb(method, response.get("result"), response)
         if method != "test_connection":
             await self._emit("state", self.snapshot())

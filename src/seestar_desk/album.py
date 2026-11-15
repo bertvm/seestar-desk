@@ -200,7 +200,7 @@ async def _with_previews(session, directory: str, files: list[dict[str, Any]]) -
             if candidate in known:
                 continue
             try:
-                response = await session.command("get_img_file_info", f"{directory}/{candidate}")
+                response = await session.command("get_img_file_info", f"{directory}/{candidate}", quiet=True)
             except ScopeError:
                 continue
             result = response.get("result") if isinstance(response.get("result"), dict) else {}

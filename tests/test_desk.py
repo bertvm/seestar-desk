@@ -218,6 +218,13 @@ class ScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(placed[0]["dec"], -10)
         self.assertLess(placed[0]["dec"], 0)
 
+    async def test_a_missing_preview_is_not_an_album_error(self) -> None:
+        self.fake.folder_files = [{"name": "light_stack_1.fit", "size_k": 20, "date": "", "is_dir": False}]
+        self.session.state["last_error"] = ""
+        files = await list_folder(self.session, "M 42")
+        self.assertEqual([item["name"] for item in files], ["light_stack_1.fit"])
+        self.assertEqual(self.session.state["last_error"], "")
+
     def test_fits_header_is_read_as_hours(self) -> None:
         def card(key: str, value: str) -> bytes:
             return f"{key:<8}= {value}".ljust(80).encode("ascii")
