@@ -742,9 +742,13 @@ button.wide {
   gap: 0.6rem;
 }
 
-.stack-view { min-height: min(72vh, 860px); margin-bottom: 0.8rem; }
+.stack-view { min-height: 160px; margin: 0.8rem 0; }
+
+.stack-view.hero { min-height: min(72vh, 860px); }
 
 .live-view { height: 280px; min-height: 280px; }
+
+.live-view.hero { height: auto; min-height: min(62vh, 720px); }
 
 .stage .placeholder {
   position: absolute;

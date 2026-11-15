@@ -191,16 +191,23 @@ def _u16_array(payload: bytes, count: int, big_endian: bool) -> array:
 
 
 def _stretch_limits(pixels: array, stride: int) -> tuple[int, int]:
-    sample = list(pixels[::stride]) or [0]
-    sample.sort()
-    black = sample[max(0, len(sample) // 40)]
-    white = sample[min(len(sample) - 1, int(len(sample) * 0.995))]
+    return _limits(list(pixels[::stride]) or [0])
+
+
+def _limits(sample: list[int]) -> tuple[int, int]:
+    if not sample:
+        return 0, 1
+    ordered = sorted(sample)
+    black = ordered[max(0, len(ordered) // 40)]
+    white = ordered[min(len(ordered) - 1, int(len(ordered) * 0.995))]
     if white <= black:
-        white = black + 1
+        return black, black
     return black, white
 
 
 def _scale(value: int, black: int, white: int) -> int:
+    if white <= black:
+        return 0
     if value <= black:
         return 0
     if value >= white:
@@ -256,19 +263,47 @@ def _bayer_to_jpeg(payload: bytes, width: int, height: int, big_endian: bool, ma
         step += 1
     out_w = max(1, width // step)
     out_h = max(1, height // step)
-    black, white = _stretch_limits(pixels, max(1, len(pixels) // 4000))
+    shared = _stretch_limits(pixels, max(1, len(pixels) // 4000))
+    reds: list[int] = []
+    greens: list[int] = []
+    blues: list[int] = []
+    sample_step = max(2, step * 2)
+    for sy in range(0, height - 1, 2):
+        row = sy * width
+        for sx in range(0, width - 1, sample_step):
+            greens.append(pixels[row + sx])
+            reds.append(pixels[row + sx + 1])
+            blues.append(pixels[row + width + sx])
+            greens.append(pixels[row + width + sx + 1])
+    red_limits = _limits(reds)
+    green_limits = _limits(greens)
+    blue_limits = _limits(blues)
+    if red_limits[1] <= red_limits[0]:
+        red_limits = shared
+    if green_limits[1] <= green_limits[0]:
+        green_limits = shared
+    if blue_limits[1] <= blue_limits[0]:
+        blue_limits = shared
     raw = bytearray(out_w * out_h * 3)
     cursor = 0
     for y in range(out_h):
         sy = min(height - 2, y * step)
+        if sy % 2:
+            sy -= 1
         for x in range(out_w):
             sx = min(width - 2, x * step)
+            if sx % 2:
+                sx -= 1
             # Seestar previews are GRBG: green, red on the even row, then blue, green.
             green = (pixels[sy * width + sx] + pixels[(sy + 1) * width + sx + 1]) // 2
             red = pixels[sy * width + sx + 1]
             blue = pixels[(sy + 1) * width + sx]
-            raw[cursor] = _scale(red, black, white)
-            raw[cursor + 1] = _scale(green, black, white)
-            raw[cursor + 2] = _scale(blue, black, white)
+            raw[cursor] = _scale(red, *red_limits)
+            raw[cursor + 1] = _scale(green, *green_limits)
+            raw[cursor + 2] = _scale(blue, *blue_limits)
             cursor += 3
-    return _save_jpeg(Image.frombytes("RGB", (out_w, out_h), bytes(raw)), quality)
+    image = Image.frombytes("RGB", (out_w, out_h), bytes(raw))
+    # The sensor's long axis is upright. Turn it so an open arm fills the wide picture.
+    if image.height > image.width:
+        image = image.transpose(Image.Transpose.ROTATE_270)
+    return _save_jpeg(image, quality)

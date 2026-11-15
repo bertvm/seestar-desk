@@ -558,6 +558,42 @@ class ScopeSession:
     async def _preview_for_stream(self) -> None:
         await self._ensure_preview(force=True)
 
+    def _sun_up(self) -> bool:
+        from datetime import datetime, timezone
+
+        from seestar_desk.sky import sun_altitude
+
+        lat = _coord(self.state.get("latitude"))
+        lon = _coord(self.state.get("longitude"))
+        if lat is None or lon is None:
+            return False
+        return sun_altitude(lat, lon, datetime.now(timezone.utc)) > 0
+
+    async def _daylight_preview(self) -> None:
+        """A night exposure washes out the open arm in daylight. Use a short one instead."""
+        if self._exposure_busy() or not self._sun_up() or getattr(self, "_daylight_preview", False):
+            return
+        try:
+            await self.command("get_setting", timeout=4)
+        except ScopeError:
+            pass
+        exp = dict((self.state.get("settings") or {}).get("exp_ms") or {})
+        stack_l = exp.get("stack_l") if exp.get("stack_l") not in (None, "") else 10000
+        try:
+            continuous = float(exp.get("continuous") if exp.get("continuous") not in (None, "") else 10000)
+        except (TypeError, ValueError):
+            continuous = 10000
+        if continuous > 50:
+            try:
+                await self.command("set_setting", {"exp_ms": {"stack_l": stack_l, "continuous": 5}})
+            except ScopeError as exc:
+                self.state["live_error"] = str(exc)
+        try:
+            await self.command("set_control_value", ["gain", 40])
+        except ScopeError as exc:
+            self.state["live_error"] = str(exc)
+        self._daylight_preview = True
+
     async def _ensure_preview(self, force: bool = False) -> None:
         """Open the camera where it is pointing so the image port will send frames."""
         if self._exposure_busy():
@@ -575,6 +611,7 @@ class ScopeSession:
             return
         if stage == "ContinuousExposure" and (not force or time.time() - self._preview_at < 4):
             return
+        await self._daylight_preview()
         self._preview_at = time.time()
         params: dict[str, Any] = {
             "mode": self.state.get("mode") or "star",

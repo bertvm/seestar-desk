@@ -124,6 +124,15 @@ class ImageTests(unittest.TestCase):
         parsed = FrameParser().feed(frame)[0][1]
         self.assertTrue(to_jpeg(parsed).startswith(b"\xff\xd8"))
 
+    def test_preview_is_shown_landscape(self) -> None:
+        from PIL import Image
+
+        pixels = array("H", [100, 400, 800, 200, 300, 900, 500, 100])
+        frame = build_frame(pixels.tobytes(), PREVIEW, 2, 4, data_type=2)
+        parsed = FrameParser().feed(frame)[0][1]
+        image = Image.open(io.BytesIO(to_jpeg(parsed)))
+        self.assertGreater(image.size[0], image.size[1])
+
     def test_preview_treats_the_pattern_as_grbg(self) -> None:
         from PIL import Image
 

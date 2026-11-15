@@ -1381,7 +1381,13 @@ function renderSky() {
     </div>`;
 }
 
+function exposureRunning(snap) {
+  const phase = String((snap && snap.stack && snap.stack.state) || "").toLowerCase();
+  return ["start", "working", "stacking"].includes(phase);
+}
+
 function renderPicture() {
+  const stacking = exposureRunning(state.snap);
   return `
     <div class="page-head">
       <div>
@@ -1398,17 +1404,17 @@ function renderPicture() {
       </div>
     </div>
     ${banner()}
-    <div class="stage stack-view">
-      <img id="stack-stage" alt="Latest stacked frame">
-      <div class="placeholder" id="stack-stage-empty">The stack appears here</div>
-      <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Stack · <span data-field="stack"></span></span></div>
-    </div>
     <div class="work">
       <div>
-        <div class="stage live-view">
+        <div class="stage live-view${stacking ? "" : " hero"}">
           <img id="stage" alt="">
           <div class="placeholder" id="stage-empty">Opening the telephoto…</div>
           <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem"><span data-live-camera>${state.camera === "wide" ? "Wide angle" : "Telephoto"}</span> · <span data-field="target"></span></span></div>
+        </div>
+        <div class="stage stack-view${stacking ? " hero" : ""}">
+          <img id="stack-stage" alt="Latest stacked frame">
+          <div class="placeholder" id="stack-stage-empty">The stack appears here</div>
+          <div class="overlay"><span class="card" style="padding:0.35rem 0.6rem">Stack · <span data-field="stack"></span></span></div>
         </div>
         <div class="nudge card">
           <div class="pad" id="pad"><span class="n">up</span><span class="e">right</span><span class="s">down</span><span class="w">left</span></div>
